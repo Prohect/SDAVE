@@ -1,0 +1,20 @@
+[package]
+name = "sdave"
+version = "0.4.0"
+description = "Streamable Delimiter-Adaptive Verbatim Envelope: a flat, payload-verbatim, streaming-safe envelope parser for mixed channels."
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "streaming", "protocol", "framing", "parser"]
+categories = ["encoding", "parser-implementations"]
+
+[dependencies]
+
+# This package is its own workspace root: the crate is developed, tested and
+# published standalone, and further member crates can be added here later.
+[workspace]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
