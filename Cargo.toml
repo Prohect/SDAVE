@@ -1,0 +1,30 @@
+[package]
+name = "sdave"
+version.workspace = true
+description = "Streamable Delimiter-Adaptive Verbatim Envelope: a flat, payload-verbatim, streaming-safe envelope parser for mixed channels."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "streaming", "protocol", "framing", "parser"]
+categories = ["encoding", "parser-implementations"]
+# This package is its own workspace root, so its directory also holds the member
+# crates (which cargo excludes from a package by itself) and the editor furniture.
+exclude = [".zed/", ".gitignore"]
+
+[dependencies]
+
+# This package is its own workspace root: the crate is developed, tested and
+# published standalone, and further member crates can be added here later.
+[workspace]
+resolver = "3"
+members = ["sdave-codec", "sdave-derive", "sdave-derive-impl"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+license = "MIT"
+# The crates use `Allocator`, `Vec::new_in` and `Box::new_in` ungated, so the floor is a
+# toolchain where `allocator_api` is stable. Declared here so cargo refuses an older one
+# with a version error instead of a wall of `E0658`.
+rust-version = "1.100"
