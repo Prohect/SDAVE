@@ -126,7 +126,7 @@ delimiter. This limiter pair mental burden addon is NOT solvable on application 
 For variant1, head and tail of payload and tail of existing contents(if NOT ended
 by a complete variant1 envelope) in the mixed buffer before this envelope can at
 most each disable one limiter pair. Thus at most 3 limiter pairs can be disabled
-for this envelope. Two contiguous envelopes can have same delimiter pair.
+for this envelope. Two contiguous envelopes can have same limiter pair.
 
 assume limiter pair set same as example every above.
 `0%%A%%%%B%%%%C%%1` -> [0, payload A, payload B, payload C, 1]
