@@ -154,7 +154,7 @@ For variant2, head of payload and tail of existing contents in the mixed buffer
 before this envelope can at most each disable one limiter pair. Thus at most 2
 limiter pairs can be disabled for this envelope. Two contiguous envelopes MUST
 NOT share same delimiter pare(won't contribut 2 to 3). And variant2 introduce
-a dilimiter slice confirmation latency.
+a delimiter slice confirmation latency.
 
 assume limiter pair set same as example every above.
 `0%%A%%%%B%%%%C%%1` -> [0, payload A%%, B, pending C%%1]
