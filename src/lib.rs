@@ -840,7 +840,14 @@ where
 /// can be parsed to get an Envelop framing payload.
 ///
 /// # Safety
-/// `buffer[..offset]` MUST end/tail with NonEnvelop or Unknown, MUST NOT end/tail with an (unarchived) Envelop, a (partial) limiter slice or a potential limiter slice.
+/// `offset` MUST be a clean item boundary of `buffer`: head of buffer, or tail of an
+/// archived item (NonEnvelop or Envelop), i.e. somewhere parsing would restart scanning
+/// fresh. `buffer[..offset]` MUST NOT tail with live contents (an unarchived Envelop, a
+/// PartialLimiterSlice, or a potential limiter slice); if it does, the returned answer
+/// is meaningless. Note that tailing with the limiter unit is fine when those Ts belong
+/// to an archived Envelop's delimiter slice (e.g. two contiguous V1 Envelopes sharing
+/// the same limiter pair): the parser restarts at `offset`, so the limiter run there is
+/// exactly the written one.
 pub unsafe fn can_serialize<T: Sized + PartialEq + Clone>(
     variant: Variant,
     buffer: &[T],
@@ -860,22 +867,10 @@ pub unsafe fn can_serialize<T: Sized + PartialEq + Clone>(
     if o > buffer.len() {
         return None;
     }
-    // (a) the limiter run MUST start exactly at `offset`:
-    // buffer[..offset] MUST NOT tail with full limiter units,
-    let mut i = o;
-    while i >= ulen && buffer[i - ulen..i] == ul[..] {
-        i -= ulen;
-    }
-    if i != o {
-        return None;
-    }
-    // nor with a partial unit prefix that the unit's self-overlap would merge into the run.
-    for s in 1..ulen.min(o + 1) {
-        if buffer[o - s..o] == ul[..s] && ul[s..] == ul[..ulen - s] {
-            return None;
-        }
-    }
-    // (b) the limiter run MUST be exactly `k` units long: the content right after the
+    // NOTE: no check on `buffer[..offset]`'s tail here — per the safety contract,
+    // `offset` is a clean item boundary where parsing restarts fresh, so the limiter
+    // run written at `offset` is exactly `k` units regardless of preceding Ts.
+    // (a) the limiter run MUST be exactly `k` units long: the content right after the
     // written limiter slice (payload, or the written delimiter slice for empty/tiny
     // payloads) MUST NOT start with a full limiter unit.
     let mut extends = true;
@@ -893,7 +888,7 @@ pub unsafe fn can_serialize<T: Sized + PartialEq + Clone>(
     if extends {
         return None;
     }
-    // (c) find the minimal repeat whose delimiter slice is first confirmed exactly at
+    // (b) find the minimal repeat whose delimiter slice is first confirmed exactly at
     // payload end. Repeats greater than the maximal delimiter unit run inside payload
     // can only fail for repeat-independent (boundary/confirmation) reasons, so they
     // bound the search.
@@ -1485,10 +1480,12 @@ mod tests {
             unsafe { can_serialize(Variant::V1, b"0", off(1), b"", b"1", &p3) },
             None
         );
-        // context tailing with the limiter unit would merge the runs
+        // context tailing with an archived delimiter slice is a clean restart boundary,
+        // so two contiguous V1 Envelopes can share the same limiter pair
+        let p4 = pair(b"%", b"%", 2);
         assert_eq!(
-            unsafe { can_serialize(Variant::V1, b"0^", off(2), b"A", b"1", &p2) },
-            None
+            unsafe { can_serialize(Variant::V1, b"0%%A%%", off(6), b"B", b"1", &p4) },
+            Some(nz(2))
         );
     }
 
