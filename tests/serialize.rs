@@ -93,7 +93,16 @@ fn can_serialize_edge_cases() {
     // two contiguous V1 Envelopes can share the same limiter pair: tailing with an
     // archived delimiter slice is a clean restart boundary
     assert_eq!(
-        unsafe { can_serialize(Variant::V1, b"0%%A%%", off(6), b"B", b"1", &pair(b"%", b"%", 2)) },
+        unsafe {
+            can_serialize(
+                Variant::V1,
+                b"0%%A%%",
+                off(6),
+                b"B",
+                b"1",
+                &pair(b"%", b"%", 2),
+            )
+        },
         Some(nz(2))
     );
 }
@@ -200,8 +209,9 @@ fn round_trip_v2_payload_tail_collision() {
         (b"B".as_slice(), &caret, b"1".as_slice()),
     ] {
         // SAFETY: buf.len() is a clean item boundary.
-        let k = unsafe { can_serialize(Variant::V2, &buf, off(buf.len()), payload, following, pair) }
-            .expect("payload should be serializable");
+        let k =
+            unsafe { can_serialize(Variant::V2, &buf, off(buf.len()), payload, following, pair) }
+                .expect("payload should be serializable");
         frame(&mut buf, pair, k.get(), payload);
         frames.push((payload.to_vec(), k.get()));
     }

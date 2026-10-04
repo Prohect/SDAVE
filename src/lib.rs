@@ -1,4 +1,11 @@
 //! for limiter_pairs not exceeding assertions for simple algorithm(~not recommended), SDAVE parser just select the first matching valid limiter_pair, and thus you get the freedom to sort the limiter_pairs and influent how would SDAVE parser select limiter_pair (e.g. [("ab","de",2),("ababac","dede",1)] for buffer "ababacedede" -> limiter slice "abab" ++ payload "ace" ++ delimiter slice "dede";[("ababac","dede",1),("ab","de",2)] for buffer "ababacedede" -> limiter slice "ababac" ++ payload "e" ++ delimiter slice "dede").
+extern crate self as sdave;
+
+mod codec;
+pub use codec::*;
+
+#[cfg(feature = "derive")]
+pub use sdave_derive::{Deserialize, Serialize};
 
 use std::num::NonZeroUsize;
 
@@ -35,13 +42,9 @@ impl NonMaxUsize {
     /// # Safety
     /// Safe to call; marked `unsafe` only to draw attention to the panic contract.
     pub unsafe fn offset_by(&mut self, offset: usize) {
-        self.non_max = NonZeroUsize::new(
-            self.get()
-                .checked_sub(offset)
+        self.non_max =
+            NonZeroUsize::new(self.get().checked_sub(offset).expect(NON_MAX_ERROR_MESSAGE) + 1)
                 .expect(NON_MAX_ERROR_MESSAGE)
-                + 1,
-        )
-        .expect(NON_MAX_ERROR_MESSAGE)
     }
 }
 /// absolute offset on buffer index.
@@ -693,8 +696,7 @@ where
         {
             self.archived_boundaries.insert(0, Envelop::phantom());
         }
-        if self.archived_boundaries.is_empty()
-            && self.tail_non_envelop.is_some_and(|t| t.get() > 0)
+        if self.archived_boundaries.is_empty() && self.tail_non_envelop.is_some_and(|t| t.get() > 0)
         {
             self.archived_boundaries.push(Envelop::phantom());
         }
@@ -735,7 +737,12 @@ where
         loop {
             let old = self.parser_state.clone();
             let new = unsafe {
-                crate::parse_incremental(self.variant, self.buffer, &self.limiter_pairs, old.clone())
+                crate::parse_incremental(
+                    self.variant,
+                    self.buffer,
+                    &self.limiter_pairs,
+                    old.clone(),
+                )
             };
             self.absorb(&old, &new);
             let progressed = new.state != old.state;
@@ -1228,7 +1235,11 @@ mod tests {
 
     #[test]
     fn v1_shared_limiter() {
-        let pairs = vec![pair(b"^", b"~", 2), pair(b"^", b"~~", 2), pair(b"^", b"!", 2)];
+        let pairs = vec![
+            pair(b"^", b"~", 2),
+            pair(b"^", b"~~", 2),
+            pair(b"^", b"!", 2),
+        ];
         assert_eq!(
             collect(Variant::V1, b"1^^A!B!~~~~C", &pairs),
             vec![
@@ -1328,7 +1339,11 @@ mod tests {
 
     #[test]
     fn v2_shared_limiter_order_a() {
-        let pairs = vec![pair(b"^", b"~", 2), pair(b"^", b"~~", 2), pair(b"^", b"!", 2)];
+        let pairs = vec![
+            pair(b"^", b"~", 2),
+            pair(b"^", b"~~", 2),
+            pair(b"^", b"!", 2),
+        ];
         assert_eq!(
             collect(Variant::V2, b"1^^A!B!~~~~C", &pairs),
             vec![
@@ -1342,7 +1357,11 @@ mod tests {
 
     #[test]
     fn v2_shared_limiter_order_b() {
-        let pairs = vec![pair(b"^", b"~~", 2), pair(b"^", b"~", 2), pair(b"^", b"!", 2)];
+        let pairs = vec![
+            pair(b"^", b"~~", 2),
+            pair(b"^", b"~", 2),
+            pair(b"^", b"!", 2),
+        ];
         assert_eq!(
             collect(Variant::V2, b"1^^A!B!~~~~C", &pairs),
             vec![

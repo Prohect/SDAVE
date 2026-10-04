@@ -56,10 +56,7 @@ fn streaming_partial_limiter_slice() {
         s => panic!("expected PartialLimiterSlice, got {s:?}"),
     }
     // the NonEnvelop in front of it is already archived and iterable
-    assert_eq!(
-        collect(&mut parser),
-        vec![Item::PhantomE, Item::Ne(0, 3)]
-    );
+    assert_eq!(collect(&mut parser), vec![Item::PhantomE, Item::Ne(0, 3)]);
 
     // the run completes into a limiter slice, then an Envelop archives
     let buf2: &[u8] = b"abc^^x~~";
@@ -146,7 +143,8 @@ fn decouple_and_rebuild() {
     let buf2: &[u8] = b"0^^A~~1";
     // SAFETY: buf2 == buf1 ++ appended contents; boundaries/tail_ne/state all come from
     // decoupling a parser of buf1, untouched.
-    let mut parser = unsafe { FlatParser::new_unchecked(buf2, variant, pairs, boundaries, tail_ne, state) };
+    let mut parser =
+        unsafe { FlatParser::new_unchecked(buf2, variant, pairs, boundaries, tail_ne, state) };
     assert_eq!(
         collect(&mut parser),
         vec![
@@ -182,7 +180,9 @@ fn iter_from_skips_cached_items() {
 
     let from_start: Vec<Item> = parser.iter().map(|s| item_of(&s)).collect();
     // SAFETY: pos 2 is within the cached archived items.
-    let from_two: Vec<Item> = unsafe { parser.iter_from(2) }.map(|s| item_of(&s)).collect();
+    let from_two: Vec<Item> = unsafe { parser.iter_from(2) }
+        .map(|s| item_of(&s))
+        .collect();
     assert_eq!(from_two, &from_start[2..]);
     assert_eq!(
         from_two,

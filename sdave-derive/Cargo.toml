@@ -1,0 +1,20 @@
+[package]
+name = "sdave-derive"
+version = "0.2.1"
+description = "Native Serialize and Deserialize derives for SDAVE."
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+categories = ["encoding", "parser-implementations"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full", "visit"] }
+
+[[test]]
+name = "derive"
+path = "src/derive_tests.rs"

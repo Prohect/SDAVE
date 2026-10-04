@@ -1,0 +1,37 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "adapter": "CodeLLDB",
+    "label": "cargo test all_variant_and_positional_forms_have_declared_arity",
+    "build": {
+      "label": "cargo test all_variant_and_positional_forms_have_declared_arity",
+      "command": "cargo",
+      "args": [
+        "test",
+        "all_variant_and_positional_forms_have_declared_arity",
+        "--no-run"
+      ],
+      "env": {
+        "RUSTC_TOOLCHAIN": "C:\\Users\\76288\\.rustup\\toolchains\\nightly-x86_64-pc-windows-msvc"
+      },
+      "cwd": "F:\\workspace\\zed×ak4h\\SDAVE",
+      "use_new_terminal": false,
+      "allow_concurrent_runs": false,
+      "reveal": "always",
+      "reveal_target": "dock",
+      "hide": "never",
+      "tags": [],
+      "shell": "system",
+      "show_summary": false,
+      "show_command": false,
+      "save": "none",
+      "hooks": []
+    },
+    "sourceLanguages": [
+      "rust"
+    ]
+  }
+]

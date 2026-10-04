@@ -8,12 +8,18 @@ repository = "https://github.com/Prohect/SDAVE"
 keywords = ["serialization", "streaming", "protocol", "framing", "parser"]
 categories = ["encoding", "parser-implementations"]
 
+[features]
+default = ["derive"]
+derive = ["dep:sdave-derive"]
+
 [dependencies]
+sdave-derive = { version = "0.2.1", path = "sdave-derive", optional = true }
 
 # This package is its own workspace root: the crate is developed, tested and
 # published standalone, and further member crates can be added here later.
 [workspace]
 resolver = "3"
+members = ["sdave-derive"]
 
 [workspace.package]
 edition = "2024"

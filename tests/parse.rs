@@ -197,14 +197,22 @@ fn v2_long_run() {
 fn v2_bad_pair_set_shared_limiter_order_matters() {
     // README: the application stabilizes behavior by sorting the LimiterPairs.
     // [('^','~',2), ('^','~~',2), ('^','!',2)]: `1^^A!B!~~~~C` -> [1, payload A!B!~~, C]
-    let order_a = vec![pair(b"^", b"~", 2), pair(b"^", b"~~", 2), pair(b"^", b"!", 2)];
+    let order_a = vec![
+        pair(b"^", b"~", 2),
+        pair(b"^", b"~~", 2),
+        pair(b"^", b"!", 2),
+    ];
     let buf = b"1^^A!B!~~~~C";
     let items = collect_buf(Variant::V2, buf, &order_a);
     let envs = envelops_of(&items);
     assert_eq!(&buf[envs[0].1..envs[0].2], b"A!B!~~");
 
     // [('^','~~',2), ('^','~',2), ('^','!',2)]: same buffer -> [1, payload A!B!, C]
-    let order_b = vec![pair(b"^", b"~~", 2), pair(b"^", b"~", 2), pair(b"^", b"!", 2)];
+    let order_b = vec![
+        pair(b"^", b"~~", 2),
+        pair(b"^", b"~", 2),
+        pair(b"^", b"!", 2),
+    ];
     let items = collect_buf(Variant::V2, buf, &order_b);
     let envs = envelops_of(&items);
     assert_eq!(&buf[envs[0].1..envs[0].2], b"A!B!");
@@ -217,20 +225,14 @@ fn limiter_pair_order_freedom() {
     let order_a = vec![pair(b"ab", b"de", 2), pair(b"ababac", b"dede", 1)];
     let buf = b"ababacedede";
     let items = collect_buf(Variant::V1, buf, &order_a);
-    assert_eq!(
-        items,
-        vec![Item::Env(0, 4, 7, Some(11)), Item::Ne(11, 11)]
-    );
+    assert_eq!(items, vec![Item::Env(0, 4, 7, Some(11)), Item::Ne(11, 11)]);
     let envs = envelops_of(&items);
     assert_eq!(&buf[envs[0].1..envs[0].2], b"ace");
 
     // [("ababac","dede",1),("ab","de",2)]: same buffer -> limiter "ababac" ++ payload "e" ++ delimiter "dede"
     let order_b = vec![pair(b"ababac", b"dede", 1), pair(b"ab", b"de", 2)];
     let items = collect_buf(Variant::V1, buf, &order_b);
-    assert_eq!(
-        items,
-        vec![Item::Env(0, 6, 7, Some(11)), Item::Ne(11, 11)]
-    );
+    assert_eq!(items, vec![Item::Env(0, 6, 7, Some(11)), Item::Ne(11, 11)]);
     let envs = envelops_of(&items);
     assert_eq!(&buf[envs[0].1..envs[0].2], b"e");
 }
