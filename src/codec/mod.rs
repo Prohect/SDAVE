@@ -7,13 +7,17 @@ mod config;
 mod de;
 mod error;
 mod framing;
+mod grammar;
 mod impls;
 mod names;
 mod ser;
 
-pub use config::{Config, Limits};
+pub use config::{Config, ConfigFingerprint, Limits};
 pub use de::{Deserializer, Payload, Record, ValueRun, VariantRun};
 pub use error::{Error, ErrorKind, PathSegment, Result};
+pub use grammar::{
+    FieldHeader, is_formatting, parse_field_header, trim_metadata, trim_metadata_range,
+};
 pub use impls::{ByteBuf, Bytes};
 pub use names::{DefaultNames, NamePolicy, ShortType, type_marker};
 pub use ser::Serializer;

@@ -899,3 +899,32 @@ The following are deliberately not silently resolved here:
 Source renames, changing structural/basic status, and changing abbreviation
 policy can change the wire contract. Defaults enable selected missing-field
 compatibility; they do not make unknown fields or unknown variants acceptable.
+
+## 15. Public application-facing primitives (0.2.3)
+
+An application that re-scans streaming payloads — for example, to surface a
+partially received record before its enclosing envelope is confirmed — must apply
+the same metadata grammar the codec uses. Publishing these primitives keeps one
+source of truth, so an application's view cannot drift from what the codec
+serializes and validates:
+
+- `is_formatting`, `trim_metadata` / `trim_metadata_range` — the section 3.1
+  ASCII-formatting trimming of a `NonEnvelop` metadata region. An empty trimmed
+  region is a formatting gap, not a type or field marker.
+- `parse_field_header` (with `FieldHeader`) — the section 3.2 named-field split
+  at the exact `": "`. Namespace separators `"::"`, tuple and nested generic
+  syntax, and virtual variant records stay inside the type expression;
+  `field:Type` is rejected rather than rewritten.
+- `Deserializer::check_marker` — compares an incoming marker with the
+  policy-rendered marker for `T`, with the same tuple-padding equivalence used
+  during decoding.
+
+A framing profile also gains a stable identity:
+
+- `Config`, `Limits` and `LimiterPair` derive `PartialEq`/`Eq`/`Hash` for
+  in-memory comparison, and `Config::fingerprint()` returns a
+  `ConfigFingerprint` reproducible across processes and releases (the standard
+  library's `DefaultHasher` is not). The digest covers `variant`, the ordered
+  limiter pairs and `limits`; pair order is significant because SDAVE selects the
+  first matching pair. The algorithm is part of the public contract and must
+  remain stable across releases.

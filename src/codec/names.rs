@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use crate::error_new;
 
 use super::error::{Error, ErrorKind, Result};
+use super::grammar::is_formatting;
 
 /// A type exemplar selecting its root named constructor for abbreviation.
 ///
@@ -525,9 +526,6 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn is_formatting(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
-}
 
 fn is_identifier_start(ch: char) -> bool {
     // Preserve non-ASCII identifiers opaquely, including combining marks. The

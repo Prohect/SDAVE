@@ -9,7 +9,7 @@ use super::{Error, ErrorKind, NamePolicy, Result, names::Names};
 /// `max_elements` counts real envelopes (including headers), not phantoms.
 /// Delimiter work is a conservatively charged upper bound on framing scans,
 /// including verification, rather than a wall-clock timeout.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Limits {
     pub max_depth: usize,
     pub max_input_bytes: usize,
@@ -32,13 +32,28 @@ impl Default for Limits {
     }
 }
 
+/// A stable, cross-run digest of a [`Config`].
+///
+/// [`std::hash::Hash`] with the standard library's default hasher is not
+/// reproducible across processes or Rust releases. This digest is, so it can be
+/// persisted and compared. See [`Config::fingerprint`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConfigFingerprint(u64);
+
+impl ConfigFingerprint {
+    /// The raw digest value.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// An immutable framing/limits configuration for the typed codec.
 ///
 /// The initial typed profile deliberately supports only distinct single UTF-8
 /// scalar units, with disjoint limiter/delimiter sets and no ASCII formatting
 /// units. This rejects ambiguous profiles and guarantees representable empty
 /// frames. The fundamental parser still accepts its broader general profiles.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Config {
     variant: Variant,
     pairs: Vec<LimiterPair<u8>>,
@@ -77,6 +92,45 @@ impl Config {
 
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    /// A stable digest over this profile: `variant`, the ordered limiter pairs
+    /// and `limits`.
+    ///
+    /// The standard library's `Hash`/`DefaultHasher` are not reproducible across
+    /// processes or Rust releases; this digest is, so it can be persisted and
+    /// compared — for example to detect that a reloaded document or session was
+    /// authored under a different framing profile. Pair order is significant
+    /// (SDAVE selects the first matching pair), so it contributes to the digest.
+    /// The dependency-free FNV-1a encoding below is part of the public contract
+    /// and MUST remain stable across releases; use `Hash` for in-memory
+    /// comparison and this only when a value must survive serialization.
+    pub fn fingerprint(&self) -> ConfigFingerprint {
+        let mut hash = Fnv1a::new();
+        hash.write(&[self.variant as u8]);
+        for value in [
+            self.limits.max_depth,
+            self.limits.max_input_bytes,
+            self.limits.max_output_bytes,
+            self.limits.max_elements,
+            self.limits.max_delimiter_work,
+            self.limits.max_repeat,
+        ] {
+            hash.write_usize(value);
+        }
+        hash.write_usize(self.pairs.len());
+        for pair in &self.pairs {
+            match pair.least_repeat {
+                Some(repeat) => {
+                    hash.write(&[1]);
+                    hash.write_usize(repeat.get());
+                }
+                None => hash.write(&[0]),
+            }
+            hash.write_bytes(&pair.limiter);
+            hash.write_bytes(&pair.delimiter);
+        }
+        ConfigFingerprint(hash.finish())
     }
 
     fn validate(&self) -> Result<()> {
@@ -231,4 +285,36 @@ pub(super) struct Budget {
     depth: usize,
     elements: usize,
     work: usize,
+}
+
+/// Dependency-free FNV-1a, used only for the stable [`ConfigFingerprint`].
+struct Fnv1a(u64);
+
+impl Fnv1a {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write(&(value as u64).to_le_bytes());
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.write_usize(bytes.len());
+        self.write(bytes);
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
 }

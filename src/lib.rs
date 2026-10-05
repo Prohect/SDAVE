@@ -62,7 +62,7 @@ fn off(raw: usize) -> Offset {
 /// Technically, limiter can equal to (a repeating unit/a sequence of)delimiter: it would cause conflicts between empty Envelop and long limiter slice; in case of that, SDAVE always consider the slice as long limiter slice, and an empty-payload-Envelop is impossible; it's not recommended.
 /// Technically, one limiter can has multiple delimiters in different LimiterPairs, it's not recommended.
 /// Technically, one delimiter can has multiple limiters in different LimiterPairs, it's not recommended.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LimiterPair<T: Sized + PartialEq + Clone> {
     /// Case parsing: match `limiter`/`delimiter` first, then guard on `least_repeat` where assertion(repeat>=1) is always true.
     /// Case serializing: the minimal repeat to frame certain payload being inserted at `buffer[..offset] _here_ buffer[offset..]` without introducing conflicts.
@@ -146,7 +146,7 @@ impl Envelop {
 }
 
 /// Delimiter match algorithm variant. There's not a full winner, choose based on scene.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Variant {
     /// The every first full matched delimiter slice is just the delimiter slice. No
     /// delimiter slice confirmation latency, but tail of payload MUST NOT collide with

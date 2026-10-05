@@ -1,6 +1,6 @@
 [package]
 name = "sdave"
-version = "0.2.1"
+version = "0.2.3"
 description = "Streamable Delimiter-Adaptive Verbatim Envelope: a flat, payload-verbatim, streaming-safe envelope parser for mixed channels."
 edition.workspace = true
 license.workspace = true

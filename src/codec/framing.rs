@@ -4,26 +4,17 @@ use crate::{
     error_new,
 };
 
-use super::{ErrorKind, Payload, Result, config::Context};
+use super::{ErrorKind, Payload, Result, config::Context, grammar::trim_metadata_range};
 
 pub(super) enum Token<'de> {
     Metadata(Payload<'de>),
     Envelope(Payload<'de>),
 }
 
-fn formatting(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
-}
-
 fn metadata<'de>(tokens: &mut Vec<Token<'de>>, input: Payload<'de>, start: usize, end: usize) {
-    let mut head = start;
-    let mut tail = end;
-    while head < tail && formatting(input.bytes()[head]) {
-        head += 1;
-    }
-    while tail > head && formatting(input.bytes()[tail - 1]) {
-        tail -= 1;
-    }
+    let (head, tail) = trim_metadata_range(&input.bytes()[start..end]);
+    let head = start + head;
+    let tail = start + tail;
     if head != tail {
         tokens.push(Token::Metadata(Payload::with_offset(
             &input.bytes()[head..tail],

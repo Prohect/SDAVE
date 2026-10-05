@@ -4,6 +4,7 @@ use super::{
     BasicType, Config, DefaultNames, Deserialize, Error, ErrorKind, NamePolicy, Result,
     config::Context,
     framing::{self, Token},
+    grammar::parse_field_header,
 };
 use crate::{error_new, error_payload};
 
@@ -237,7 +238,13 @@ impl<P: NamePolicy> Deserializer<P> {
         self.context.names.render::<T>()
     }
 
-    fn check_marker<T: ?Sized>(&self, marker: &str, offset: usize) -> Result<()> {
+    /// Validate that `marker` is the policy-rendered type marker for `T`.
+    ///
+    /// Neither side is abbreviated here, so a qualified spelling cannot bypass a
+    /// policy that requires the short spelling. Tuple-comma padding is treated as
+    /// equivalent, exactly as during decoding. No outer metadata trimming is
+    /// performed, so pass an already-trimmed marker.
+    pub fn check_marker<T: ?Sized>(&self, marker: &str, offset: usize) -> Result<()> {
         let expected = self.type_marker::<T>().map_err(|error| error.at(offset))?;
         if self
             .context
@@ -334,14 +341,9 @@ impl<P: NamePolicy> Deserializer<P> {
         for token in framing::parse(&mut self.context, payload, true)? {
             match token {
                 Token::Metadata(header) => {
-                    let text = header.as_str()?;
-                    let (name, marker) = text
-                        .split_once(": ")
-                        .filter(|(name, marker)| !name.is_empty() && !marker.is_empty())
-                        .ok_or_else(|| {
-                            error_new!(ErrorKind::InvalidFieldHeader(text.into()))
-                                .at(header.offset())
-                        })?;
+                    let (name, marker) = parse_field_header(header.as_str()?)
+                        .map_err(|error| error.at(header.offset()))?
+                        .into_parts();
                     if !names.insert(name) {
                         return Err(error_new!(ErrorKind::DuplicateField(name.into()))
                             .at(header.offset())
