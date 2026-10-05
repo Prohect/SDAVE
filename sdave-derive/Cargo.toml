@@ -1,6 +1,6 @@
 [package]
 name = "sdave-derive"
-version = "0.2.1"
+version = "0.2.2"
 description = "Native Serialize and Deserialize derives for SDAVE."
 edition.workspace = true
 license.workspace = true
