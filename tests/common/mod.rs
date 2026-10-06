@@ -64,7 +64,7 @@ pub fn item_of(s: &State) -> Item {
     }
 }
 
-/// drain the parser, then collect every iterated item.
+/// collect every iterated item, stepping the parser as needed.
 pub fn collect<T: Sized + PartialEq + Clone>(parser: &mut FlatParser<T>) -> Vec<Item> {
     parser.parse_incremental();
     parser.iter().map(|s| item_of(&s)).collect()

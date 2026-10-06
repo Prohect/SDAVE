@@ -13,7 +13,7 @@ fn streaming_append_only() {
     // stage 1: a limiter slice and the first payload bytes arrive
     let buf1: &[u8] = b"0^^he";
     let mut parser = FlatParser::new(buf1, Variant::V1, pairs.clone());
-    parser.parse_incremental();
+    parser.parse_all();
     match parser.parser_state().state() {
         State::E { envelop } => {
             assert_eq!(envelop.head_offset().get(), 1);
@@ -79,7 +79,7 @@ fn advance_reclaims_consumed_prefix() {
 
     let buf2: &[u8] = b"0^^hello~~1";
     let mut parser = FlatParser::new(buf2, Variant::V1, pairs.clone());
-    parser.parse_incremental();
+    parser.parse_all();
 
     // drop everything up to the end of the archived Envelop (offset 10)
     // SAFETY: the buffer is advanced by exactly 10.
@@ -112,7 +112,7 @@ fn advance_mid_envelop_keeps_truncated_marker() {
 
     let buf: &[u8] = b"0%%A%%1%%B%%2";
     let mut parser = FlatParser::new(buf, Variant::V1, pairs.clone());
-    parser.parse_incremental();
+    parser.parse_all();
     // items: PhantomE, Ne(0,1), E(1..6), Ne(6,7), E(7..12), Ne(12,13)
 
     // advance into the middle of the second Envelop
@@ -187,6 +187,35 @@ fn iter_from_skips_cached_items() {
     assert_eq!(
         from_two,
         vec![
+            Item::Env(1, 3, 4, Some(6)),
+            Item::Ne(6, 7),
+            Item::Env(7, 9, 10, Some(12)),
+            Item::Ne(12, 13),
+        ]
+    );
+}
+
+#[test]
+fn parse_incremental_steps_one_item_and_iter_drains() {
+    let pairs = std_pairs();
+    let buf: &[u8] = b"0^^A~~1^^B~~2";
+    let mut parser = FlatParser::new(buf, Variant::V1, pairs);
+
+    // one call advances exactly one step, not the whole buffer.
+    parser.parse_incremental();
+    assert!(matches!(
+        parser.parser_state().state(),
+        State::E { envelop } if envelop.tail_offset().is_none()
+    ));
+    assert_eq!(parser.archived_boundaries().len(), 1); // the phantom for the leading NonEnvelop
+
+    // `iter` drives the remaining steps and still yields the whole channel.
+    let items: Vec<Item> = parser.iter().map(|s| item_of(&s)).collect();
+    assert_eq!(
+        items,
+        vec![
+            Item::PhantomE,
+            Item::Ne(0, 1),
             Item::Env(1, 3, 4, Some(6)),
             Item::Ne(6, 7),
             Item::Env(7, 9, 10, Some(12)),

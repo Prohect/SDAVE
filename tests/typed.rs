@@ -245,7 +245,9 @@ fn literal_scalar_and_vector_examples_and_real_headers() {
         Variant::V1,
         profile(Variant::V1).limiter_pairs().to_vec(),
     );
-    parser.parse_incremental();
+    // One-step parser: drain to a settled cache before inspecting the boundaries
+    // directly. `iter()` would do this lazily, but this test reads the cache itself.
+    parser.parse_all();
     assert!(parser.archived_boundaries()[0].is_phantom());
     assert!(!parser.archived_boundaries()[1].is_phantom());
 }

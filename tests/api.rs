@@ -55,7 +55,7 @@ fn flat_parser_accessors() {
     assert_eq!(parser.limiter_pairs().len(), 4);
     assert!(matches!(parser.parser_state().state(), State::Unknown));
 
-    parser.parse_incremental();
+    parser.parse_all();
     // [PhantomE, E] archived; trailing `1` is the live NonEnvelop
     assert_eq!(parser.archived_boundaries().len(), 2);
     assert!(parser.archived_boundaries()[0].is_phantom());
@@ -71,7 +71,7 @@ fn flat_parser_accessors() {
 fn envelop_getters() {
     let buf: &[u8] = b"0^^^hello~~~~~1";
     let mut parser = FlatParser::new(buf, Variant::V1, std_pairs());
-    parser.parse_incremental();
+    parser.parse_all();
     let env = &parser.archived_boundaries()[1];
     assert_eq!(env.head_offset().get(), 1);
     assert_eq!(env.payload_head_offset().get(), 4);

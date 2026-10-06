@@ -461,7 +461,10 @@ where
     /// Some(phantom NonEnvelop) can be returned if no NonEnvelop between two Envelops.
     ///
     /// reuse cached FlatParser::archived_boundaries & FlatParser::tail_non_envelop where pos < FlatParser::archived_boundaries.len() * 2 - if FlatParser::tail_non_envelop.is_none(){1}.
-    /// otherwise, try parse_incremental to update FlatParser::archived_boundaries & FlatParser::tail_non_envelop then retry.
+    /// otherwise, drive parse_incremental step by step until an item is cached or the
+    /// parser settles. Cache-neutral steps that only make progress (for example locating an
+    /// Envelop that is not archived yet, or growing a pending payload) are swallowed, so
+    /// each call yields exactly one observable item -- never an intermediate unarchived step.
     /// then return latest unarchived state if it is either an Envelop or a NonEnvelop.
     /// then return None if latest unarchived Envelop or unarchived NonEnvelop is ALREADY iterated or latest state is PartialLimiterSlice or Unknown.
     fn next(&mut self) -> Option<Self::Item> {
@@ -500,21 +503,29 @@ where
                 self.pos += 1;
                 return Some(item);
             }
-            // try to grow the cache, then retry.
-            let before = (
+            // Drive the parser step by step until an item is cached or it settles. A step
+            // may cache a new item, make progress without caching (an Envelop located but
+            // not archived yet, or a pending payload growing), or settle. Only a settled
+            // step exposes the trailing unarchived item; intermediate steps are consumed
+            // here so one `next` call still yields exactly one observable item.
+            let before_cache = (
                 self.parser.archived_boundaries.len(),
                 self.parser.tail_non_envelop,
             );
+            let before_state = self.parser.parser_state.state.clone();
             self.parser.parse_incremental();
-            let after = (
+            let after_cache = (
                 self.parser.archived_boundaries.len(),
                 self.parser.tail_non_envelop,
             );
-            if after != before {
+            if after_cache != before_cache {
+                continue;
+            }
+            if self.parser.parser_state.state != before_state {
                 continue;
             }
             if self.pos == cached {
-                // return the latest unarchived state if it is an Envelop or a NonEnvelop.
+                // settled: the latest unarchived state is the trailing item.
                 return match &self.parser.parser_state.state {
                     State::E { .. } | State::NonEnvelop { .. } => {
                         let item = self.parser.parser_state.state.clone();
@@ -728,26 +739,40 @@ where
     pub unsafe fn replace_buffer(&mut self, buffer: &'a [T]) {
         self.buffer = buffer
     }
-    /// expected usage: loop until returned state is unarchived or break anytime you want.
+    /// Advance the state machine by exactly one step and return the new state.
     ///
-    /// each call drains the buffer as far as possible: archived items are absorbed into
-    /// `archived_boundaries` / `tail_non_envelop`, and the returned state is the latest
-    /// (possibly unarchived) one.
+    /// A step locates the next limiter slice (a freshly unarchived `E`), archives an
+    /// unarchived `E` once its delimiter slice is confirmed, scans past an archived `E`
+    /// toward the next item, or makes no progress (a settled unarchived `E`/`NonEnvelop`,
+    /// a trailing `PartialLimiterSlice`, or `Unknown`). Confirmed items are absorbed into
+    /// `archived_boundaries` / `tail_non_envelop` as each step runs.
+    ///
+    /// A single call does NOT drain the buffer. To consume everything currently available,
+    /// call repeatedly until the returned state stops advancing, or use [`parse_all`].
+    ///
+    /// [`parse_all`]: FlatParser::parse_all
     pub fn parse_incremental(&mut self) -> &State {
+        let old = self.parser_state.clone();
+        let new = unsafe {
+            crate::parse_incremental(self.variant, self.buffer, &self.limiter_pairs, old.clone())
+        };
+        self.absorb(&old, &new);
+        self.parser_state = new;
+        &self.parser_state.state
+    }
+    /// Drain the buffer: call [`parse_incremental`](FlatParser::parse_incremental) until the
+    /// state stops advancing, then return the terminal state.
+    ///
+    /// The terminal state is a settled unarchived `E` or `NonEnvelop`, a trailing
+    /// `PartialLimiterSlice`, or `Unknown`. This is the "parse everything currently
+    /// available" convenience. Streaming callers that interleave buffer growth with
+    /// parsing should step [`parse_incremental`](FlatParser::parse_incremental) themselves
+    /// so one call stays bounded to one item.
+    pub fn parse_all(&mut self) -> &State {
         loop {
-            let old = self.parser_state.clone();
-            let new = unsafe {
-                crate::parse_incremental(
-                    self.variant,
-                    self.buffer,
-                    &self.limiter_pairs,
-                    old.clone(),
-                )
-            };
-            self.absorb(&old, &new);
-            let progressed = new.state != old.state;
-            self.parser_state = new;
-            if !progressed {
+            let before = self.parser_state.state.clone();
+            self.parse_incremental();
+            if self.parser_state.state == before {
                 break;
             }
         }
@@ -1008,7 +1033,9 @@ pub unsafe fn get_all_serializable_limiter_pairs<T: Sized + PartialEq + Clone>(
 ///   `payload_tail_offset`.
 /// - archived E (tail_offset is Some): start the next item after its tail_offset.
 ///
-/// expected usage: call parse_incremental inside a loop until returned state is unarchived, or break midturn if you want.
+/// expected usage: call in a loop until the returned state stops changing (a settled
+/// unarchived E/NonEnvelop is terminal), or break midturn if you want. One call returns
+/// after a single step, so whole-buffer draining requires that loop.
 ///
 /// # Safety
 /// old_parser_state MUST match buffer's content by offset and semantics.
@@ -1295,6 +1322,9 @@ mod tests {
                 Item::Ne(6, 6),
                 Item::Env(6, 8, 9, Some(11)),
                 // the pending Envelop shares E2's tail: no NonEnvelop slot between them.
+                // payload_tail=15 is the settled report: the `!!` slice at 14..16 is
+                // followed by another `!` and the `!!` at 15..17 ends at EOB, so neither
+                // is confirmed; `buffer[13..15]` (`C!`) is the confirmed-free prefix.
                 Item::Env(11, 13, 15, None),
             ]
         );
@@ -1417,7 +1447,7 @@ mod tests {
     fn advance_shifts_and_counts() {
         let buf: &[u8] = b"0%%A%%1%%B%%2";
         let mut parser = FlatParser::new(buf, Variant::V1, std_pairs());
-        parser.parse_incremental();
+        parser.parse_all();
         // items: PhantomE, Ne(0,1), E(1..6), Ne(6,7), E(7..12), Ne(12,13)
         let removed = unsafe {
             parser.replace_buffer(&buf[7..]);
@@ -1546,5 +1576,99 @@ mod tests {
         assert!(matches!(st.state, State::NonEnvelop { .. }));
         let st2 = unsafe { parse_incremental(Variant::V1, buf, &pairs, st.clone()) };
         assert_eq!(st2.state, st.state, "state machine should converge");
+    }
+
+    // ---- one-step method contract ----
+
+    #[test]
+    fn parse_incremental_method_is_one_step() {
+        let buf: &[u8] = b"0%%A%%1%%B%%2";
+        let mut parser = FlatParser::new(buf, Variant::V1, std_pairs());
+        // step 1: the leading NonEnvelop is archived and the first limiter slice located.
+        parser.parse_incremental();
+        assert_eq!(item_of(parser.parser_state().state()), Item::Env(1, 3, 3, None));
+        assert_eq!(parser.archived_boundaries().len(), 1);
+        assert_eq!(parser.tail_non_envelop(), Some(off(1)));
+        // step 2: the first Envelop archives.
+        parser.parse_incremental();
+        assert_eq!(item_of(parser.parser_state().state()), Item::Env(1, 3, 4, Some(6)));
+        assert_eq!(parser.archived_boundaries().len(), 2);
+        assert_eq!(parser.tail_non_envelop(), None);
+        // step 3: scan toward the next item.
+        parser.parse_incremental();
+        assert_eq!(item_of(parser.parser_state().state()), Item::Env(7, 9, 9, None));
+        // step 4: it archives.
+        parser.parse_incremental();
+        assert_eq!(item_of(parser.parser_state().state()), Item::Env(7, 9, 10, Some(12)));
+        // step 5: the trailing NonEnvelop.
+        parser.parse_incremental();
+        assert_eq!(item_of(parser.parser_state().state()), Item::Ne(12, 13));
+        // step 6+: settled; further calls change nothing.
+        let settled = parser.parser_state().state().clone();
+        let boundaries = parser.archived_boundaries().len();
+        parser.parse_incremental();
+        parser.parse_incremental();
+        assert_eq!(parser.parser_state().state(), &settled);
+        assert_eq!(parser.archived_boundaries().len(), boundaries);
+    }
+
+    #[test]
+    fn parse_incremental_leaves_partial_tail_unconsumed() {
+        // trailing `1^`: the lone `^` is a potential limiter slice, not an item.
+        let mut parser = FlatParser::new(b"0^^A~~1^", Variant::V1, std_pairs());
+        parser.parse_all();
+        match parser.parser_state().state() {
+            State::PartialLimiterSlice { head_offset } => assert_eq!(head_offset.get(), 7),
+            s => panic!("expected PartialLimiterSlice, got {s:?}"),
+        }
+        let boundaries = parser.archived_boundaries().len();
+        let tail = parser.tail_non_envelop();
+        parser.parse_incremental();
+        parser.parse_incremental();
+        assert_eq!(parser.archived_boundaries().len(), boundaries);
+        assert_eq!(parser.tail_non_envelop(), tail);
+        assert!(matches!(parser.parser_state().state(), State::PartialLimiterSlice { .. }));
+    }
+
+    #[test]
+    fn iter_yields_one_item_without_intermediate_steps() {
+        // One-step-parser regression pin: `iter` must present exactly one observable item
+        // per yield. When two Envelopes are contiguous (a zero-length NonEnvelop gap), the
+        // intermediate "limiter located but not yet archived/delimiter-scanned" step is
+        // internal and must be swallowed. The worked examples above assert exact sequences;
+        // this states the invariant they rely on: no yielded Envelop carries a `None` tail.
+        let items = collect(Variant::V1, b"0%%A%%%%B%%%%C%%1", &std_pairs());
+        assert_eq!(items.len(), 8);
+        assert_eq!(items[3], Item::Ne(6, 6));
+        assert_eq!(items[5], Item::Ne(11, 11));
+        for item in &items {
+            if let Item::Env(_, _, _, tail) = item {
+                assert!(tail.is_some(), "iter leaked an unarchived Envelop: {item:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_all_equals_stepping_to_settle() {
+        let buf: &[u8] = b"0%%A%%1%%B%%2";
+        let mut drained = FlatParser::new(buf, Variant::V1, std_pairs());
+        drained.parse_all();
+
+        let mut stepped = FlatParser::new(buf, Variant::V1, std_pairs());
+        let mut prev = stepped.parser_state().state().clone();
+        loop {
+            stepped.parse_incremental();
+            let now = stepped.parser_state().state().clone();
+            if now == prev {
+                break;
+            }
+            prev = now;
+        }
+        assert_eq!(drained.parser_state().state(), stepped.parser_state().state());
+        assert_eq!(
+            drained.archived_boundaries().len(),
+            stepped.archived_boundaries().len()
+        );
+        assert_eq!(drained.tail_non_envelop(), stepped.tail_non_envelop());
     }
 }
