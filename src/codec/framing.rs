@@ -4,7 +4,7 @@ use crate::{
     error_new,
 };
 
-use super::{ErrorKind, Payload, Result, config::Context, grammar::trim_metadata_range};
+use super::{ErrorKind, PairSelect, Payload, Result, config::Context, grammar::trim_metadata_range};
 
 pub(super) enum Token<'de> {
     Metadata(Payload<'de>),
@@ -292,8 +292,13 @@ fn maximum_run(context: &mut Context, payload: &[u8], unit: &[u8]) -> Result<usi
 pub(super) fn frame(context: &mut Context, payload: &[u8]) -> Result<Vec<u8>> {
     context.output(payload.len())?;
     context.element()?;
+    let policy = context.config.pair_select();
     let pairs = context.config.limiter_pairs().to_vec();
     let mut limit_error = None;
+    // The best framed candidate so far, as `(repeat, bytes)`. Iterating in
+    // profile order and replacing only on a strict improvement keeps the earliest
+    // pair on ties, so `FirstMatch` is exactly the historical behaviour.
+    let mut best: Option<(usize, Vec<u8>)> = None;
     for pair in pairs {
         if payload.starts_with(&pair.limiter) {
             continue;
@@ -325,21 +330,41 @@ pub(super) fn frame(context: &mut Context, payload: &[u8]) -> Result<Vec<u8>> {
         // Units are single scalars, all distinct and none is ASCII formatting.
         // Newline cannot continue/prefix a delimiter or an opening limiter.
         // Every nested child gets its own confirmation inside the parent slice.
-        match parse(context, Payload::new(&candidate), false) {
+        let framed = match parse(context, Payload::new(&candidate), false) {
             Ok(tokens) => {
-                if tokens.len() == 1
+                tokens.len() == 1
                     && matches!(&tokens[0], Token::Envelope(actual) if actual.offset() == expected_head && actual.bytes() == payload)
-                {
-                    return Ok(candidate);
-                }
             }
             Err(error) if matches!(error.kind, ErrorKind::LimitExceeded { .. }) => {
                 return Err(error);
             }
-            Err(_) => {}
+            Err(_) => false,
+        };
+        if !framed {
+            continue;
+        }
+        let replace = match &best {
+            None => true,
+            Some((best_repeat, best_bytes)) => match policy {
+                PairSelect::FirstMatch => false,
+                PairSelect::LeastRepeat => repeat < *best_repeat,
+                PairSelect::SmallestFrame => {
+                    candidate.len() < best_bytes.len()
+                        || (candidate.len() == best_bytes.len() && repeat < *best_repeat)
+                }
+            },
+        };
+        if replace {
+            best = Some((repeat, candidate));
+        }
+        if policy == PairSelect::FirstMatch {
+            break;
         }
     }
-    Err(limit_error.unwrap_or_else(|| error_new!(ErrorKind::NoDelimiter)))
+    match best {
+        Some((_, bytes)) => Ok(bytes),
+        None => Err(limit_error.unwrap_or_else(|| error_new!(ErrorKind::NoDelimiter))),
+    }
 }
 
 pub(super) fn marker(context: &mut Context, text: &str) -> Result<Vec<u8>> {

@@ -77,6 +77,13 @@ impl<P: NamePolicy> Serializer<P> {
         Ok(bytes)
     }
 
+    /// Frame `payload` with one selected limiter pair.
+    ///
+    /// The pair is chosen according to the profile's [`PairSelect`] policy over
+    /// the config's ordered pair list; the resulting envelope always re-parses to
+    /// exactly `payload` under that list, so decoding is unaffected.
+    ///
+    /// [`PairSelect`]: crate::PairSelect
     pub fn frame(&mut self, payload: &[u8]) -> Result<Vec<u8>> {
         framing::frame(&mut self.context, payload)
     }

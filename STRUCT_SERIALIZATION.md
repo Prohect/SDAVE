@@ -925,6 +925,20 @@ A framing profile also gains a stable identity:
   in-memory comparison, and `Config::fingerprint()` returns a
   `ConfigFingerprint` reproducible across processes and releases (the standard
   library's `DefaultHasher` is not). The digest covers `variant`, the ordered
-  limiter pairs and `limits`; pair order is significant because SDAVE selects the
-  first matching pair. The algorithm is part of the public contract and must
-  remain stable across releases.
+  limiter pairs, `limits` and the serializer's `PairSelect` policy; pair order is
+  significant because SDAVE selects the first matching pair. The algorithm is
+  part of the public contract and must remain stable across releases. The 0.3.0
+  policy byte is appended after the 0.2.3 fields, so the existing layout is
+  prefix-preserving, but appending it changes the digest of every profile
+  (including profiles that keep the default policy).
+
+### Serializer pair-selection policy (0.3.0)
+
+Since 0.3.0 the serializer profile carries a `PairSelect` policy that chooses
+which framing pair the serializer uses; the parser is unaffected and still takes
+the first matching valid pair, so pair order remains significant and every
+policy round-trips under the same profile. `FirstMatch` is the default and is the
+pre-0.3.0 behaviour; `LeastRepeat` and `SmallestFrame` reduce delimiter repeats
+and total envelope size respectively. The policy is consulted per framed
+envelope and works over any ordered pair list a `Config` carries, including
+profiles the library did not author.

@@ -62,6 +62,24 @@ Repeating the same delimiter solves `payload–delimiter slice` corruption issue
 otherwise the payload is broken by SDAVE when there's conflict between payload
 and delimiter slice.
 
+#### Serializer limiter pair select
+
+The parser always takes the **first** matching valid limiter pair; pair order is
+significant. The serializer, which may pick any pair that frames a payload, is
+governed by an explicit policy carried on the codec profile (`PairSelect`):
+
+- `FirstMatch` (default) — the first pair, in profile order, that can frame the
+  payload. Historical behaviour; aligns with the parser.
+- `LeastRepeat` — the pair whose framing needs the fewest delimiter repeats.
+- `SmallestFrame` — the pair whose framed envelope is smallest in bytes.
+
+Minimising repeats matters because a payload that collides with one pair's
+delimiter forces that pair's delimiter slice to grow past the run inside the
+payload; a nested document whose payloads collide with the first pair's
+delimiter otherwise grows without bound with nesting depth. The policy operates
+over whatever ordered pair list the profile carries, and never changes how
+documents are decoded.
+
 #### Delimiter match algorithm
 
 There's not a full winner, choose based on scene.

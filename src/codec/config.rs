@@ -47,17 +47,55 @@ impl ConfigFingerprint {
     }
 }
 
+/// How the serializer picks which limiter pair frames a payload.
+///
+/// The policy is consulted once per framed envelope (see [`Serializer`]'s
+/// [`frame`](crate::Serializer::frame)), so a whole document is framed by the
+/// same policy consistently at every nesting level. It never affects decoding:
+/// the parser still selects the first matching valid pair in profile order.
+///
+/// Every policy operates over whatever ordered pair list the [`Config`] carries,
+/// including lists the library did not author.
+///
+/// [`Serializer`]: crate::Serializer
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PairSelect {
+    /// The first pair, in profile order, that can frame the payload.
+    ///
+    /// This is SDAVE's historical behaviour and keeps serialization aligned with
+    /// the parser's first-match selection. Pair order is load-bearing.
+    #[default]
+    FirstMatch,
+    /// The pair whose framing needs the fewest delimiter repeats; ties go to the
+    /// earliest pair in profile order.
+    ///
+    /// Minimising repeats keeps the delimiter slice short for payloads whose
+    /// content collides with another pair's delimiter, which is what makes
+    /// deeply nested documents grow on the wire.
+    LeastRepeat,
+    /// The pair whose framed envelope occupies the fewest bytes; ties go to the
+    /// fewest repeats, then the earliest pair in profile order.
+    ///
+    /// This refines [`PairSelect::LeastRepeat`] when pairs have different unit
+    /// widths, comparing the actual on-wire size instead of the repeat count.
+    SmallestFrame,
+}
+
 /// An immutable framing/limits configuration for the typed codec.
 ///
 /// The initial typed profile deliberately supports only distinct single UTF-8
 /// scalar units, with disjoint limiter/delimiter sets and no ASCII formatting
 /// units. This rejects ambiguous profiles and guarantees representable empty
 /// frames. The fundamental parser still accepts its broader general profiles.
+///
+/// The serializer's pair-selection policy ([`PairSelect`]) is part of the
+/// profile and participates in [`Config::fingerprint`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Config {
     variant: Variant,
     pairs: Vec<LimiterPair<u8>>,
     limits: Limits,
+    pair_select: PairSelect,
 }
 
 impl Config {
@@ -66,6 +104,7 @@ impl Config {
             variant,
             pairs,
             limits: Limits::default(),
+            pair_select: PairSelect::default(),
         };
         config.validate()?;
         Ok(config)
@@ -82,8 +121,22 @@ impl Config {
         Ok(self)
     }
 
+    /// Select the serializer's limiter-pair policy.
+    ///
+    /// Infallible: the policy needs no profile validation and does not affect
+    /// decoding. The default is [`PairSelect::FirstMatch`].
+    pub fn with_pair_select(mut self, pair_select: PairSelect) -> Self {
+        self.pair_select = pair_select;
+        self
+    }
+
     pub fn variant(&self) -> Variant {
         self.variant
+    }
+
+    /// The serializer's limiter-pair selection policy.
+    pub fn pair_select(&self) -> PairSelect {
+        self.pair_select
     }
 
     pub fn limiter_pairs(&self) -> &[LimiterPair<u8>] {
@@ -94,16 +147,21 @@ impl Config {
         &self.limits
     }
 
-    /// A stable digest over this profile: `variant`, the ordered limiter pairs
-    /// and `limits`.
+    /// A stable digest over this profile: `variant`, the ordered limiter pairs,
+    /// `limits` and the [`PairSelect`] policy.
     ///
     /// The standard library's `Hash`/`DefaultHasher` are not reproducible across
     /// processes or Rust releases; this digest is, so it can be persisted and
     /// compared — for example to detect that a reloaded document or session was
     /// authored under a different framing profile. Pair order is significant
     /// (SDAVE selects the first matching pair), so it contributes to the digest.
-    /// The dependency-free FNV-1a encoding below is part of the public contract
-    /// and MUST remain stable across releases; use `Hash` for in-memory
+    /// The policy is appended after the 0.2.3 fields, so the existing byte layout
+    /// is unchanged (prefix-preserving) and no field is renumbered. Note that
+    /// appending a field still changes the digest value of every profile,
+    /// including profiles that keep the default policy: a fingerprint persisted
+    /// under 0.2.3 no longer equals the 0.3.0 fingerprint of the same logical
+    /// profile. The dependency-free FNV-1a encoding below is part of the public
+    /// contract and MUST remain stable across releases; use `Hash` for in-memory
     /// comparison and this only when a value must survive serialization.
     pub fn fingerprint(&self) -> ConfigFingerprint {
         let mut hash = Fnv1a::new();
@@ -130,6 +188,7 @@ impl Config {
             hash.write_bytes(&pair.limiter);
             hash.write_bytes(&pair.delimiter);
         }
+        hash.write(&[self.pair_select as u8]);
         ConfigFingerprint(hash.finish())
     }
 
@@ -191,6 +250,7 @@ impl Default for Config {
             variant: Variant::V2,
             pairs,
             limits: Limits::default(),
+            pair_select: PairSelect::default(),
         }
     }
 }

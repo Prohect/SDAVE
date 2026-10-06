@@ -12,7 +12,7 @@ mod impls;
 mod names;
 mod ser;
 
-pub use config::{Config, ConfigFingerprint, Limits};
+pub use config::{Config, ConfigFingerprint, Limits, PairSelect};
 pub use de::{Deserializer, Payload, Record, ValueRun, VariantRun};
 pub use error::{Error, ErrorKind, PathSegment, Result};
 pub use grammar::{
