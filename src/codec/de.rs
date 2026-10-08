@@ -190,6 +190,20 @@ impl<'de> Record<'de> {
         result.map_err(|error: Error| error.in_field(name))
     }
 
+    /// Remove a field and return its declared marker text and value run **without**
+    /// interpreting the value. Use when the concrete type is chosen at runtime, for
+    /// example a `dyn Trait` field whose value bytes are self-identifying.
+    pub fn take_raw(&mut self, name: &str) -> Result<Option<(&'de str, ValueRun<'de>)>> {
+        let Some(field) = self.fields.iter_mut().find(|field| field.name == name) else {
+            return Ok(None);
+        };
+        let marker = field.marker;
+        let run = field.run.take().ok_or_else(|| {
+            error_new!(ErrorKind::DuplicateField(name.to_owned())).at(field.offset)
+        })?;
+        Ok(Some((marker, run)))
+    }
+
     /// Reject every supplied field that was not in the selected static schema.
     pub fn finish(&self) -> Result<()> {
         if let Some(field) = self.fields.iter().find(|field| field.run.is_some()) {
@@ -284,6 +298,34 @@ impl<P: NamePolicy> Deserializer<P> {
             }
         }
         self.value(ValueRun::new(frames, marker.offset()))
+    }
+
+    /// Parse a bounded payload as a standalone type-marked document and return its marker
+    /// text and value run **without** comparing the marker to a static type.
+    ///
+    /// Use this when a value's concrete type is chosen at runtime, for example the
+    /// self-identifying value bytes of a `dyn Trait` field: the marker names the concrete
+    /// type, which the application then constructs through its own registry.
+    pub fn document<'de>(&mut self, payload: Payload<'de>) -> Result<(&'de str, ValueRun<'de>)> {
+        let tokens = framing::parse(&mut self.context, payload, true)?;
+        let mut tokens = tokens.into_iter();
+        let marker = match tokens.next() {
+            Some(Token::Metadata(marker)) => marker,
+            _ => return Err(error_new!(ErrorKind::MissingMarker).at(payload.offset())),
+        };
+        let mut frames = Vec::new();
+        for token in tokens {
+            match token {
+                Token::Envelope(run) => frames.push(run),
+                Token::Metadata(metadata) => {
+                    return Err(error_new!(ErrorKind::UnexpectedMetadata(
+                        metadata.as_str()?.into(),
+                    ))
+                    .at(metadata.offset()));
+                }
+            }
+        }
+        Ok((marker.as_str()?, ValueRun::new(frames, marker.offset())))
     }
 
     pub fn from_str<'de, T: Deserialize<'de>>(&mut self, input: &'de str) -> Result<T> {

@@ -165,6 +165,31 @@ silently collapse them to the same short constructor name.
 Sender and receiver must agree on the effective spelling of exchanged types.
 A const policy freezes configuration, not Rust's spelling across toolchains.
 
+### 2.4 Trait-object (`dyn`) spellings (prototype)
+
+A type marker may be a trait object. Rust renders one as `dyn path::Trait`, optionally
+behind `Box`, `&`, `Vec`, etc. SDAVE's type-expression parser accepts these spellings
+(bare, `alloc::boxed::Box<dyn path::Trait>`, `&dyn path::Trait`, and nested) instead of
+rejecting them.
+
+- The erased marker is **`dyn ` followed by the same policy-rendered trait path as any
+  constructor**. SDAVE owns this canonical form: the vtable of a `dyn` value cannot be
+  generic over an application `NamePolicy`, so the `dyn` spelling is fixed by the parser
+  and a whitelist only abbreviates the trait path like any other path.
+- It is deterministic and is **one marker per trait regardless of the concrete
+  implementor** -- that erasure is the point.
+- It cannot collide with a concrete marker: a concrete type is never spelled with the
+  `dyn` keyword. Two traits collide only if their paths abbreviate to one short name,
+  which the existing ambiguous-abbreviation rule already rejects.
+- Non-`dyn` spellings are unchanged byte for byte.
+
+The value bytes behind a `dyn` field are produced by the application supplying
+`impl Serialize for dyn Trait`, delegating through SDAVE's object-safe `DynSerialize`
+hook. Because the vtable is not policy-generic, that inner document is rendered with the
+fixed `DynNames` policy, while the outer framing, the `dyn` marker and the surrounding
+field headers use the caller's policy. Trait-object bounds joined with `+`
+(`dyn Trait + Send`) are not accepted by this prototype.
+
 ## 3. Metadata grammar and formatting
 
 ### 3.1 Trimming

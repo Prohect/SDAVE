@@ -19,7 +19,7 @@ pub use grammar::{
     FieldHeader, is_formatting, parse_field_header, trim_metadata, trim_metadata_range,
 };
 pub use impls::{ByteBuf, Bytes};
-pub use names::{DefaultNames, NamePolicy, ShortType, type_marker};
+pub use names::{DefaultNames, DynNames, NamePolicy, ShortType, type_marker};
 pub use ser::Serializer;
 
 /// A type's declared wire shape, available without inspecting a value.
@@ -68,6 +68,29 @@ pub trait Deserialize<'de>: Sized {
         let run = decoder.run(payload)?;
         Self::deserialize_value(run, decoder)
     }
+}
+
+/// Object-safe serialization for a value erased behind a `dyn Trait` field.
+///
+/// A trait-object vtable cannot be generic over a caller's [`NamePolicy`], so SDAVE
+/// supplies this non-generic hook. An application that wants a `dyn Trait` / `Box<dyn
+/// Trait>` field to serialize:
+///
+/// 1. implements this trait for each concrete implementor, delegating to that type's
+///    [`Serialize`] (its document is rendered with the fixed [`DynNames`] policy);
+/// 2. adds it as a supertrait of the object trait (`trait AppTrait: DynSerialize {}`);
+/// 3. provides `impl Serialize for dyn AppTrait`, delegating to [`serialize_erased`]
+///    on a [`Serializer<DynNames>`](Serializer) built from the caller's
+///    [`Config`](crate::Config).
+///
+/// The `dyn` marker keeps one spelling per trait regardless of the implementor; the
+/// concrete document is carried by the value bytes.
+///
+/// [`serialize_erased`]: DynSerialize::serialize_erased
+pub trait DynSerialize {
+    /// Serialize `self` (a concrete implementor behind a trait object) as a context-known
+    /// value run, using the canonical erased policy and the caller's framing config.
+    fn serialize_erased(&self, serializer: &mut Serializer<DynNames>) -> Result<Vec<u8>>;
 }
 
 /// A fallible semantic payload codec for an explicitly basic/opaque type.

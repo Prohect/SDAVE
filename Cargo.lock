@@ -22,14 +22,25 @@ dependencies = [
 
 [[package]]
 name = "sdave"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
- "sdave-derive",
+ "sdave-derive 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "sdave-derive"
 version = "0.2.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "sdave-derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "482712257572f056910f22266f0173e649d2ccc6d7ebb9222fb12e74a42f0f51"
 dependencies = [
  "proc-macro2",
  "quote",

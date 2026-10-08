@@ -57,16 +57,30 @@ impl NamePolicy for DefaultNames {
     ];
 }
 
+/// SDAVE's fixed naming policy for a value erased behind a trait object.
+///
+/// A `dyn Trait` vtable cannot be generic over a caller's [`NamePolicy`], so an erased
+/// value's own document is rendered with this canonical policy, sharing the caller's
+/// framing [`Config`](crate::Config). The `dyn` **marker** itself is rendered by the
+/// caller's policy (see [`Parser`]'s handling of `dyn`); this only fixes the inner value.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DynNames;
+
+impl NamePolicy for DynNames {
+    const SHORT_TYPES: &'static [ShortType] = <DefaultNames as NamePolicy>::SHORT_TYPES;
+}
+
 /// Render a nonempty type marker using one validated naming policy.
 ///
 /// Supported expressions are named paths with type/lifetime arguments and simple
 /// decimal integer, bool, or character const arguments, tuples, references, slices,
-/// and arrays with decimal unsigned lengths. Compilers may omit lifetimes; when
-/// reported in generic arguments or references, their spelling is preserved.
+/// arrays with decimal unsigned lengths, and trait objects (`dyn path::Trait`, without
+/// `+` bounds). Compilers may omit lifetimes; when reported in generic arguments or
+/// references, their spelling is preserved.
 /// Integer literals are unsuffixed decimal; const literal spellings are not
 /// value-normalized.
-/// Nesting is bounded to 128 levels. Function types, trait objects, and complex
-/// const arguments return `InvalidTypeExpression` rather than being guessed at.
+/// Nesting is bounded to 128 levels. Function types and complex const arguments return
+/// `InvalidTypeExpression` rather than being guessed at.
 pub fn type_marker<T: ?Sized, P: NamePolicy>() -> Result<String> {
     Names::new::<P>()?.render::<T>()
 }
@@ -222,6 +236,7 @@ impl<'a> Parser<'a> {
             Some(b'(') => self.parse_tuple(depth).map(|()| None),
             Some(b'[') => self.parse_sequence(depth).map(|()| None),
             Some(b'&') => self.parse_reference(depth).map(|()| None),
+            _ if self.at_dyn_keyword() => self.parse_dyn(depth).map(|()| None),
             _ => self.parse_constructor(depth).map(Some),
         }
     }
@@ -257,6 +272,26 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(path)
+    }
+
+    fn parse_dyn(&mut self, depth: usize) -> Result<()> {
+        // Rust renders a trait object as `dyn path::Trait`, including the space. The
+        // `dyn ` prefix is kept verbatim and the trait path is a constructor, so it is
+        // abbreviated by the same policy as any other constructor. A vtable cannot be
+        // generic over the policy, so SDAVE owns this canonical `dyn` spelling.
+        self.pos += 3; // "dyn"
+        self.skip_formatting();
+        self.parse_type(depth + 1).map(|_| ())
+    }
+
+    /// does `self.pos` start the `dyn` keyword (rather than an identifier such as `dyn_x`)?
+    fn at_dyn_keyword(&self) -> bool {
+        self.starts_with("dyn")
+            && self
+                .text
+                .get(self.pos + 3..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|ch| !is_identifier_continue(ch))
     }
 
     fn parse_argument(&mut self, depth: usize) -> Result<()> {
@@ -949,7 +984,6 @@ mod tests {
             "&",
             "&'static",
             "fn(u8) -> u8",
-            "dyn Send",
             "extern \"C\" fn()",
             "field: u8",
             "G<{ 1 + 2 }>",
@@ -973,12 +1007,37 @@ mod tests {
                 "{expression:?}: {error}"
             );
         }
-        for error in [
-            type_marker::<fn(), DefaultNames>().unwrap_err(),
-            type_marker::<dyn std::fmt::Debug, DefaultNames>().unwrap_err(),
-        ] {
-            assert!(matches!(&error.kind, ErrorKind::InvalidTypeExpression(_)));
-        }
+        let error = type_marker::<fn(), DefaultNames>().unwrap_err();
+        assert!(matches!(&error.kind, ErrorKind::InvalidTypeExpression(_)));
+    }
+
+    #[test]
+    fn trait_object_dyn_spellings_are_accepted_and_render_canonically() {
+        trait Obj {}
+        trait Other {}
+
+        let names = Names::new::<DefaultNames>().unwrap();
+        let dyn_obj = std::any::type_name::<dyn Obj>();
+        // The `dyn` spelling is preserved (a test-local trait is not whitelisted), and
+        // Box/Vec still abbreviate. One marker per trait, distinct traits differ.
+        assert_eq!(names.render::<dyn Obj>().unwrap(), dyn_obj);
+        assert_eq!(
+            names.render::<&dyn Obj>().unwrap(),
+            std::any::type_name::<&dyn Obj>()
+        );
+        assert_eq!(names.render::<Box<dyn Obj>>().unwrap(), format!("Box<{dyn_obj}>"));
+        assert_eq!(
+            names.render::<Vec<Box<dyn Obj>>>().unwrap(),
+            format!("Vec<Box<{dyn_obj}>>")
+        );
+        assert_eq!(
+            names.render::<dyn std::fmt::Debug>().unwrap(),
+            std::any::type_name::<dyn std::fmt::Debug>()
+        );
+        assert_ne!(
+            names.render::<dyn Obj>().unwrap(),
+            names.render::<dyn Other>().unwrap()
+        );
     }
 
     #[test]
