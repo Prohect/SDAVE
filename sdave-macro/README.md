@@ -140,9 +140,10 @@ document — identity is delivered, not erased.
 
 ## Shape mapping
 
-The declared Rust shape selects the wire shape; `sdave_codec::Shape` is generated as an associated
-constant, so the type and framing are known before any value is inspected — which is what makes
-empty vectors and unit variants decodable.
+The declared Rust shape selects the wire shape; `sdave_codec::Shape` **and** `sdave_codec::DEPTH` are
+generated as associated constants, so the framing is known before any value is inspected — which is
+what makes empty vectors and unit variants decodable — and the serializer can order a record's
+fields by their depth tree. A self-referential type declares the deepest value (`DEPTH` saturates).
 
 | Declaration                                      | Wire shape | Framing                                                                                  |
 | ------------------------------------------------ | ---------- | ---------------------------------------------------------------------------------------- |
@@ -203,7 +204,8 @@ on their storage fields at all.
 The macro is written against these, so the codec must expose them and keep them stable (the codec
 README states the same list as "Obligations toward the derive"):
 
-1. a per-type **shape constant** the derive can set (`Record` / `Tuple` / `Enum`);
+1. a per-type **shape constant** the derive can set (`Record` / `Tuple` / `Enum`) **and a per-type
+   depth constant** (`DEPTH`), which is how a record's fields get their depth-sorted order;
 2. **one callable append entry per type** that a generated body calls for each child; the codec owns
    the order in which a record's fields are appended;
 3. a **type-erased write handle** (the sink carrying the naming policy dynamically) so a generated

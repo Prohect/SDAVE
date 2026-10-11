@@ -169,7 +169,9 @@ This is the part `sdave-macro` will be written against, so it must be decided he
 
 1. **A per-type shape constant** the derive can set (`Record` / `Tuple` / `Enum`) so the framing is
    known before any value is inspected — that is what makes empty vectors and unit variants
-   decodable.
+   decodable — **and a per-type depth constant** (`DEPTH`), which the serializer uses to order a
+   record's fields (see *Field order is the serializer's choice*). A self-referential type declares
+   the deepest value and the computation saturates.
 2. **One callable append entry per type**, which a generated body calls for each of its children and
    which frames the level as it closes. The **serializer** owns the order in which a record's fields
    are appended (see *Field order is the serializer's choice*); the derive supplies the fields and

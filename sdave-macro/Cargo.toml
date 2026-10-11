@@ -1,0 +1,21 @@
+[package]
+name = "sdave-macro"
+version = "0.4.0"
+description = "The macro crate of SDAVE: derives and attribute macros that turn ordinary Rust declarations into SDAVE documents by emitting calls into sdave-codec."
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "codec", "macro", "derive", "no-std"]
+categories = ["encoding", "no-std"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+sdave = { path = ".." }
+sdave-codec = { path = "../sdave-codec" }

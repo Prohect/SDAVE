@@ -1,0 +1,18 @@
+[package]
+name = "sdave-codec"
+version = "0.4.0"
+description = "The typed codec layer of SDAVE: profiles, shapes and markers, the serialize plan/write, the typed deserializer and the dyn payload machinery."
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "codec", "streaming", "no-std", "envelope"]
+categories = ["encoding", "no-std"]
+
+[dependencies]
+sdave = { path = ".." }
+
+[features]
+default = []
+# Attach host source paths (`file!()`/`line!()`) to errors. A trace is never part of the observable
+# contract: it is absent from `Display` and from `Eq` in every build, feature or not.
+trace = []
