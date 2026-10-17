@@ -18,6 +18,7 @@ exclude = [".zed/", ".gitignore"]
 # published standalone, and further member crates can be added here later.
 [workspace]
 resolver = "3"
+members = ["sdave-codec", "sdave-derive", "sdave-derive-impl"]
 
 [workspace.package]
 version = "0.4.1"

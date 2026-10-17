@@ -1,0 +1,16 @@
+[package]
+name = "sdave-derive-impl"
+version.workspace = true
+description = "The public codegen internals of sdave-derive."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "codec", "macro", "no-std"]
+categories = ["no-std"]
+
+[dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+# `full` provides `syn::ItemTrait`, which `#[sdave_dyn]` parses.
+syn = { version = "3.0.9", features = ["full"] }
