@@ -1,0 +1,18 @@
+[package]
+name = "sdave-derive"
+version.workspace = true
+description = "The codec derive layer of SDAVE."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "codec", "macro", "no-std"]
+categories = ["no-std"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# `full` provides `syn::ItemTrait`, which `#[sdave_dyn]` parses.
+syn = { version = "3.0.9", features = ["full"] }
+sdave-derive-impl = { version = "0.5.0", path = "../sdave-derive-impl" }

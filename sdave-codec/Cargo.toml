@@ -1,0 +1,59 @@
+[package]
+name = "sdave-codec"
+version.workspace = true
+description = "The typed codec layer of SDAVE."
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/Prohect/SDAVE"
+keywords = ["serialization", "codec", "streaming", "no-std", "envelope"]
+categories = ["encoding", "no-std"]
+
+[dependencies]
+sdave = { version = "0.5.0", path = ".." }
+
+[dev-dependencies]
+sdave-derive = { version = "0.5.0", path = "../sdave-derive" }
+# The tests drive the codec through the readable primitives (their payloads are decimal
+# text), so they need `primitive` whatever the caller selected. A package may
+# dev-depend on itself for exactly this: with the feature resolver this only applies
+# while building the test targets, so a plain `cargo build --no-default-features` still
+# drops the primitive impls for real. The `version` is deliberately absent: a version
+# would have to be published for the dependency to resolve, which cannot happen while
+# this very package is the one being uploaded, so cargo strips the path-only entry from
+# the published manifest instead.
+sdave-codec = { path = ".", features = ["primitive"] }
+
+[package.metadata.docs.rs]
+# Document every wire shape, not just the ones the default feature set turns on.
+all-features = true
+
+# Each extra impl is gated behind its own feature so an application pulls in only
+# the wire shapes it means to accept; the shape each feature unlocks is tabulated
+# in `README.md`. `primitive` and `vec` are the defaults, so a `u32` and a `Vec`
+# field work out of the box.
+[features]
+default = ["primitive", "vec"]
+# The readable primitives: `Display` out, `FromStr` in. Turn it off when a document
+# does not need to be human-readable and bring a raw-bytes leaf of your own. Structural
+# shapes — tuples, `()`, arrays `[T; N]`, slices — stay always on and compose with
+# whichever leaf impls exist, so `[u8; N]` follows `u8` while `[YourLeaf; N]` follows
+# yours.
+primitive = []
+# Heap containers.
+vec = []
+vec_deque = []
+linked_list = []
+btree_set = []
+# Tagged enums.
+option = []
+result = []
+# Pointer / cell wrappers.
+boxed = []
+rc = []
+arc = []
+cow = []
+cell = []
+unsafe_cell = []
+# The owned string (the deserializable counterpart of `str`).
+string = []
