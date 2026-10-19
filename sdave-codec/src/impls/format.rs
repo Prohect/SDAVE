@@ -9,6 +9,8 @@
 
 use core::fmt::Write;
 
+use sdave::Offset;
+
 use crate::Error;
 
 /// A [`core::fmt::Write`] sink over a fixed-size stack buffer, so formatting
@@ -67,13 +69,19 @@ impl<const N: usize> Write for StackBuf<N> {
 
 /// Format `value` into a stack buffer sized for up to `N` bytes.
 ///
-/// A too-small buffer is reported as [`Error::InvalidPayload`]; it can only
-/// happen if the reserved bound for the type is wrong.
+/// # Errors
+/// Returns [`Error::InvalidPayload`] when `value`'s `Display` text does not fit in `N`
+/// bytes; that can only happen if the reserved bound for the type is wrong. There is no
+/// payload in the buffer yet, so the report names the value's type and the slot
+/// `[0, N)` that was reserved for its text.
 pub fn format_display<D, const N: usize>(value: &D) -> Result<StackBuf<N>, Error>
 where
     D: core::fmt::Display + ?Sized,
 {
     let mut formatted = StackBuf::<N>::new();
-    write!(formatted, "{}", value).map_err(|_| Error::InvalidPayload)?;
+    write!(formatted, "{}", value).map_err(|_| Error::InvalidPayload {
+        r#type: core::any::type_name::<D>(),
+        caught: (Offset::new(0), Offset::new(N)),
+    })?;
     Ok(formatted)
 }

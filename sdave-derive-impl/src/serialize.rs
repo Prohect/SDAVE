@@ -19,10 +19,15 @@ use syn::{Data, DeriveInput, Fields, GenericParam, Ident, LitStr};
 use crate::{
     FieldInfo, Variants, allocator_ident, enum_slices, impl_generics, policy_ident,
     positional_struct_slices, self_type, slices_type, struct_slices, type_name_impl,
-    type_param_bounds, union_error, where_predicates_of, wire_field_types,
+    type_param_bounds, unexpected_signature, union_error, where_predicates_of, wire_field_types,
 };
 
-/// Generate `impl Serialize for #ty`.
+/// Generate `impl Serialize for #ty`, preceded by the `TypeName` impl the same type
+/// needs.
+///
+/// # Errors
+/// Returns the union rejection, or the `#[default]`/`#[skip]` attribute errors of any
+/// field of any variant.
 pub fn expand_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let allocator = allocator_ident();
     let policy = policy_ident();
@@ -170,13 +175,22 @@ pub fn serialize_typed_method(allocator: &syn::Ident, policy: &syn::Ident) -> To
 fn field_signature(field: &FieldInfo, policy: &Ident) -> TokenStream2 {
     let ty = &field.ty;
     let prefix = &field.signature_prefix;
+    // Rendering a `TypeName` into a `Vec` cannot fail; the report still points at the
+    // half-written signature it would have left behind.
+    let unrenderable = unexpected_signature(
+        &quote!(&[]),
+        &quote!((
+            ::sdave_codec::Offset::new(__sdave_signature_head),
+            ::sdave_codec::Offset::new(buffer.len()),
+        )),
+    );
     quote! {
         let __sdave_signature_head = buffer.len();
         buffer.extend_from_slice(#prefix.as_bytes());
         <#ty as ::sdave_codec::TypeName>::render::<#policy>(
             &mut ::sdave_codec::BufferWriter(&mut *buffer),
         )
-        .map_err(|_| ::sdave_codec::Error::UnexpectedItem)?;
+        .map_err(|_| #unrenderable)?;
         let __sdave_signature = (
             ::sdave_codec::Offset::new(__sdave_signature_head),
             ::sdave_codec::Offset::new(buffer.len()),
@@ -275,14 +289,14 @@ pub fn struct_serialize_body(
 
 /// The `match self` arms of an enum's `serialize` body: one arm per variant,
 /// introducing the variant's bindings and delegating the arm's statements to
-/// `arm_body`, which is called with the variant's name literal and its parsed
-/// fields.
+/// `arm_body`, which is called with the variant's name literal, its parsed fields and
+/// whether its shape is positional (`Fields::Unnamed`, i.e. no per-field signature).
 ///
 /// # Errors
 /// Returns the `#[default]`/`#[skip]` attribute errors of any variant's fields.
 pub fn enum_serialize_arms(
     variants: &Variants,
-    mut arm_body: impl FnMut(&LitStr, &[FieldInfo]) -> syn::Result<TokenStream2>,
+    mut arm_body: impl FnMut(&LitStr, &[FieldInfo], bool) -> syn::Result<TokenStream2>,
 ) -> syn::Result<Vec<TokenStream2>> {
     variants
         .iter()
@@ -290,7 +304,8 @@ pub fn enum_serialize_arms(
             let name = &variant.ident;
             let name_lit = LitStr::new(&name.to_string(), name.span());
             let fields = FieldInfo::collect(&variant.fields)?;
-            let body = arm_body(&name_lit, &fields)?;
+            let positional = matches!(variant.fields, Fields::Unnamed(_));
+            let body = arm_body(&name_lit, &fields, positional)?;
             Ok(match &variant.fields {
                 Fields::Unit => quote! {
                     Self::#name => {
@@ -365,11 +380,10 @@ pub fn enum_serialize_body(
     allocator: &Ident,
     policy: &Ident,
 ) -> syn::Result<TokenStream2> {
-    let arms = enum_serialize_arms(variants, |name_lit, fields| {
+    let arms = enum_serialize_arms(variants, |name_lit, fields, positional| {
         Ok(if fields.is_empty() {
             unit_serialize_body(name_lit)
         } else {
-            let positional = fields.iter().any(|field| field.ident.is_none());
             data_variant_serialize_body(name_lit, fields, allocator, policy, positional)
         })
     })?;
@@ -539,11 +553,10 @@ pub fn flattened_enum_serialize_body(
     allocator: &Ident,
     policy: &Ident,
 ) -> syn::Result<TokenStream2> {
-    let arms = enum_serialize_arms(variants, |name_lit, fields| {
+    let arms = enum_serialize_arms(variants, |name_lit, fields, positional| {
         Ok(if fields.is_empty() {
             flattened_unit_serialize_body(name_lit)
         } else {
-            let positional = fields.iter().any(|field| field.ident.is_none());
             flattened_data_variant_serialize_body(name_lit, fields, allocator, policy, positional)
         })
     })?;

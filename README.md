@@ -276,9 +276,9 @@ panics instead of silently caching the borrower's items.
 Q: Does the codec allocate per nesting level?
 
 A: No. `Deserialize` receives a `&mut FlatDeserializer`, lends its three `Vec`s to
-the next level and takes them back, so only the value returned to the caller (and
-one element-range list per iterable value) is allocated -- `sdave-codec/README.md`,
-*Allocation model*.
+the next level and takes them back, and an iterable's element ranges are stacked on
+native frames, so only the value returned to the caller (plus `[T; N]`'s element
+list) is allocated -- `sdave-codec/README.md`, *Allocation model*.
 
 Q: Why does `Deserialize::deserialize` take a `FlatDeserializer` instead of `&[T]`
 with variant and limiter pairs?

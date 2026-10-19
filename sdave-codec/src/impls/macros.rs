@@ -13,6 +13,10 @@
 //! - the macros that emit *associated items* rather than whole impls are invoked
 //!   inside the `impl` block the caller writes, which keeps the generics and bounds
 //!   of the wrapper visible at the point of use.
+//!
+//! One user sits outside this subtree: `iterable` implements the same slice/array
+//! shapes as the heap containers do, so it imports `impl_iterable_serialize` by
+//! path (see its re-export at the end of this file).
 
 /// The `TypeName` body of a wrapper that has no wire name of its own: it renders
 /// its referent `$target` instead, so `Rc<Vec<u32>>` reads exactly like
@@ -212,3 +216,75 @@ macro_rules! generic_serialize_typed {
         }
     };
 }
+
+/// Implement the `Serialize` half of an *iterable*: a container whose payload is a
+/// leading empty marker Envelop followed by one Envelop per element (see
+/// [`crate::iterable`]), so the whole container is still one Envelop, i.e. one
+/// `[limiter, payload, delimiter]` triple.
+///
+/// Six types spell that shape the same way — the unsized slice `[T]`, the array
+/// `[T; N]` and the four heap containers of `collections` — so they share this macro
+/// and differ only in their declarations. `$policy` is the
+/// [`NamePolicy`](crate::NamePolicy) parameter name, passed in because an array's
+/// const generic already claims `N`.
+///
+/// `str` is deliberately NOT an iterable: it is the raw-text leaf shape.
+macro_rules! impl_iterable_serialize {
+    ($ty:ty, $policy:ident $(, const $N:ident)?) => {
+        impl<T, A $(, const $N: usize)?> crate::Serialize<u8, A> for $ty
+        where
+            T: crate::Serialize<u8, A> + crate::TypeName,
+            <T as crate::Serialize<u8, A>>::Slices: ::core::convert::AsRef<
+                [::core::option::Option<(crate::Offset, crate::Offset)>],
+            >,
+            A: ::core::alloc::Allocator + ::core::clone::Clone,
+        {
+            const SLICES: usize = 3;
+            type Slices = crate::IterableSlices;
+            type SlicesTyped = crate::IterableSlices;
+
+            unsafe fn serialize<$policy: crate::NamePolicy>(
+                &self,
+                buffer: &mut alloc::vec::Vec<u8, A>,
+                variant: crate::Variant,
+                strategy: crate::Strategy,
+                limiter_pairs: &mut [crate::LimiterPair<'_, u8, A>],
+            ) -> ::core::result::Result<Self::Slices, crate::Error> {
+                unsafe {
+                    crate::serialize_iterable::<$policy, T, A, _>(
+                        buffer,
+                        self.iter(),
+                        variant,
+                        strategy,
+                        limiter_pairs,
+                    )
+                }
+            }
+
+            unsafe fn serialize_typed<$policy: crate::NamePolicy>(
+                &self,
+                buffer: &mut alloc::vec::Vec<u8, A>,
+                name: crate::Name,
+                variant: crate::Variant,
+                strategy: crate::Strategy,
+                limiter_pairs: &mut [crate::LimiterPair<'_, u8, A>],
+            ) -> ::core::result::Result<Self::SlicesTyped, crate::Error> {
+                unsafe {
+                    crate::serialize_iterable_typed::<$policy, Self, T, A, _>(
+                        buffer,
+                        self.iter(),
+                        name,
+                        variant,
+                        strategy,
+                        limiter_pairs,
+                    )
+                }
+            }
+        }
+    };
+}
+
+// Path-based, because `iterable` is a sibling of `impls` rather than a submodule of
+// it: `macro_rules!` is textually scoped, and the `#[macro_use]` in `impls` only
+// reaches the submodules declared below it.
+pub(crate) use impl_iterable_serialize;

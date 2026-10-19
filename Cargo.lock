@@ -22,11 +22,11 @@ dependencies = [
 
 [[package]]
 name = "sdave"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "sdave-codec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "sdave",
  "sdave-codec",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "sdave-derive"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "sdave-derive-impl",
  "syn",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "sdave-derive-impl"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",

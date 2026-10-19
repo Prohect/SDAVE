@@ -6,9 +6,13 @@
 mod common;
 
 use std::alloc::{AllocError, Allocator, Global, Layout};
+use std::any::Any;
 use std::num::NonZeroUsize;
 
-use common::{document, flatten, many_pairs, pair, pairs, render, round_trip_with};
+use common::{
+    deserialize_one, document, dump, flat_deserializer, flatten, items_of, many_pairs, pair, pairs,
+    print_dump, render, round_trip_with, single_item_buffer_as_envelop_payload,
+};
 use sdave_codec::*;
 use sdave_derive::{Deserialize, Serialize, sdave_dyn};
 
@@ -276,17 +280,16 @@ fn generic_round_trip() {
 // `#[sdave_dyn]`.
 // ---------------------------------------------------------------------------
 
-/// Enough distinct pairs for the nested Envelops a `dyn` field introduces.
+/// Four distinct pairs, which is the minimum that always frames: under `V1` one frame can
+/// disable at most three of them — its payload may start with one pair's limiter and end with
+/// another pair's delimiter, and the buffer before it may end with a third pair's limiter — so a
+/// fourth always survives.
 fn dyn_pairs() -> Vec<LimiterPair<'static, u8, Global>> {
     vec![
         pair(2, b"^", b"~"),
         pair(2, b"?", b"!"),
         pair(2, b"#", b"$"),
         pair(2, b"%", b"&"),
-        pair(2, b"*", b"+"),
-        pair(2, b"=", b"@"),
-        pair(2, b"/", b";"),
-        pair(2, b"|", b"\\"),
     ]
 }
 
@@ -302,14 +305,30 @@ fn dyn_round_trip(value: Container) -> Container {
     deserialize_one::<NoShortening, Container, _>(&flat, Variant::V1, &pairs, None, Global).unwrap()
 }
 
+/// The `Any` view of a `#[sdave_dyn]` trait object: the trait has no accessor of its own, so
+/// this is how a test gets the concrete value back out.
+fn as_any<'a>(value: &'a (dyn MyTrait + 'static)) -> &'a (dyn Any + 'static) {
+    value
+}
+
+/// The deepest `dyn` payload the tests use: a [`Nested`], whose [`Named`] adds two more fields.
+fn nested_container() -> Container {
+    Container {
+        id: 7,
+        tr: Box::new(nested_value()),
+    }
+}
+
+/// What [`nested_container`] carries in its `dyn` field.
+fn nested_value() -> Nested {
+    Nested {
+        a: 8,
+        inner: Named { x: 9, y: true },
+    }
+}
+
 #[test]
 fn dyn_trait_round_trip() {
-    use std::any::Any;
-
-    fn as_any<'a>(value: &'a (dyn MyTrait + 'static)) -> &'a (dyn Any + 'static) {
-        value
-    }
-
     let decoded = dyn_round_trip(Container {
         id: 3,
         tr: Box::new(Named { x: 5, y: true }),
@@ -336,22 +355,169 @@ fn dyn_trait_round_trip() {
         Tuple(6, false),
     );
 
-    let decoded = dyn_round_trip(Container {
-        id: 7,
-        tr: Box::new(Nested {
-            a: 8,
-            inner: Named { x: 9, y: true },
-        }),
-    });
+    let decoded = dyn_round_trip(nested_container());
+    assert_eq!(decoded.id, 7);
     assert_eq!(
         *as_any(&*decoded.tr)
             .downcast_ref::<Nested>()
             .expect("Nested"),
+        nested_value(),
+    );
+}
+
+/// A named field is matched by its `Signature`, so the order the fields arrive in is irrelevant
+/// — including for the innermost field of a `dyn` value, which is as deep as a foreign writer
+/// can reach. This is the codec's orderless contract (`sdave-codec/README.md`).
+///
+/// The document is the one `dyn_round_trip` round-trips, with two of its segments swapped.
+/// `deserialize` takes **one value Envelop**: the typed wrapper `serialize_typed` writes
+/// (`Envelop(Signature ++ Envelop(value))`) is not its input and is stripped first — feeding it
+/// whole is an `UnexpectedSignature` before any field is looked at.
+#[test]
+fn named_fields_deserialize_in_any_order_through_a_dyn_field() {
+    // The same pair set `dyn_round_trip` uses, so the only difference between the two documents
+    // below is the order of `Named`'s fields.
+    let pairs = dyn_pairs();
+    let container = nested_container();
+    let mut working = pairs.clone();
+    let ordered = document(&container, &mut working);
+
+    // The innermost fields exactly as `pairs` + `Strategy::FirstMatch` writes them: each
+    // field's `Signature` NonEnvelop followed by its leaf's Envelop (`^^` limiter, `~~`
+    // delimiter, the pair's 2 repeats). Swapping the two segments leaves every length and
+    // every frame intact, so only the arrival order differs.
+    let written: &[u8] = b"x: u32^^9~~y: bool^^true~~";
+    let swapped: &[u8] = b"y: bool^^true~~x: u32^^9~~";
+    let at = ordered
+        .windows(written.len())
+        .position(|window| window == written)
+        .expect("the innermost `Named` writes both fields, in declaration order");
+    let mut orderless = ordered[..at].to_vec();
+    orderless.extend_from_slice(swapped);
+    orderless.extend_from_slice(&ordered[at + written.len()..]);
+
+    // `document` produced ONE value Envelop, which is exactly what `deserialize` takes.
+    let decoded = deserialize_one::<NoShortening, Container, _>(
+        &orderless,
+        Variant::V1,
+        &pairs,
+        None,
+        Global,
+    )
+    .unwrap();
+    assert_eq!(decoded.id, container.id);
+    assert_eq!(
+        *as_any(&*decoded.tr)
+            .downcast_ref::<Nested>()
+            .expect("Nested"),
+        nested_value(),
+    );
+    let orderless = b"??id: u32^^7~~tr: derive::dyn MyTrait??derive::Nested??a: u32^^8~~inner: derive::Named??y: bool^^true~~x: u32^^9~~!!!!!!!!";
+    let de = Container::deserialize::<NoShortening>(
+        &mut flat_deserializer(orderless, Variant::V2, &dyn_pairs(), &Global),
+        Some(Offset::new(orderless.len())),
+        Global,
+    )
+    .unwrap();
+    assert_eq!(de.id, nested_container().id);
+    assert_eq!(
+        *as_any(&*de.tr).downcast_ref::<Nested>().expect("Nested"),
         Nested {
             a: 8,
             inner: Named { x: 9, y: true },
         },
     );
+    let malformed_payload = b"??id: u32^^7~~tr: derive::dyn MyTrait??derive::Nested??a: u32^^8~~inner: derive::Named??y: bool^^true~~x: u32^^9i~~!!!!!!!!";
+    let malformed_signature = b"??id: u32^^7~~tr: derive::dyn MyTrait??derive::Nested??a: u32^^8~~inner: derive::Named??y: bool^^true~~x: u31^^9~~!!!!!!!!";
+    let missing_envelop_expected = b"??id: u32^^7~~tr: derive::dyn MyTrait??derive::Nested??a: u32^^8~~inner: derive::Named??y: bool^^true~~x: u32!!!!!!!!";
+
+    // The three ways this document can go wrong, deserialized and rendered in place: the buffer
+    // they were read from is still here, so `fmt_error` quotes exactly what each report points at.
+    // Run the test with `--nocapture` to read the renderings.
+    let malformed: [&[u8]; 3] = [
+        malformed_payload,   // the innermost `x: u32` payload is `9i`, which is not a `u32`
+        malformed_signature, // the innermost signature is `x: u31`, which no field accepts
+        missing_envelop_expected, // the innermost signature has no Envelop behind it
+    ];
+    let mut rendered: Vec<String> = Vec::new();
+    for document in malformed {
+        let error = deserialize_one::<NoShortening, Container, _>(
+            document,
+            Variant::V2,
+            &dyn_pairs(),
+            Some(Offset::new(document.len())),
+            Global,
+        )
+        .err()
+        .unwrap();
+        let line = fmt_error(error, document).to_string();
+        eprintln!("{line}");
+        rendered.push(line);
+    }
+    // A bad leaf payload, a signature this type does not accept (reported at `x: u31` itself), and
+    // a signature whose Envelop is missing.
+    assert!(
+        rendered[0].starts_with("InvalidPayload { type: u32, caught: ["),
+        "{}",
+        rendered[0],
+    );
+    assert!(
+        rendered[1].starts_with(r#"UnexpectedSignature { valid_signatures: ["x", "y"], caught: ["#),
+        "{}",
+        rendered[1],
+    );
+    assert!(rendered[1].ends_with(r#") "x: u31" }"#), "{}", rendered[1],);
+    assert!(
+        rendered[2].starts_with("MissingEnvelop { required_by: ["),
+        "{}",
+        rendered[2],
+    );
+}
+
+/// A *typed* document — `Envelop(NonEnvelop(signature) ++ Envelop(value))`, which is what
+/// `serialize_typed` writes and a parent's field reader consumes — is read through the value
+/// Envelop inside it, under `V2`, with the field order it arrives in.
+#[test]
+fn a_typed_document_reads_through_its_value_envelop() {
+    let container = nested_container();
+    let mut buffer: Vec<u8> = Vec::new();
+    let slices = unsafe {
+        container
+            .serialize_typed::<NoShortening>(
+                &mut buffer,
+                Name {
+                    head_offset: Offset::new(0),
+                    tail_offset: Offset::new(0),
+                },
+                Variant::V2,
+                Strategy::LeastRepeat,
+                &mut dyn_pairs(),
+            )
+            .unwrap()
+    };
+    // What `serialize_typed` writes with this pair set, then the same document with `Named`'s two
+    // fields swapped.
+    let ordered = b"??derive::Container??id: u32^^7~~tr: derive::dyn MyTrait??derive::Nested??a: u32^^8~~inner: derive::Named??x: u32^^9~~y: bool^^true~~!!!!!!!!!!";
+    let orderless = b"??derive::Container??id: u32^^7~~tr: derive::dyn MyTrait??derive::Nested??a: u32^^8~~inner: derive::Named??y: bool^^true~~x: u32^^9~~!!!!!!!!!!";
+    assert_eq!(flatten(&buffer, &slices), ordered);
+    println!("ok");
+
+    // Both are complete buffers, so both dumps are given `final_buffer`: the two structures differ
+    // only in `Named`'s innermost pair of groups.
+    let mut ordered_slices = dump(
+        ordered,
+        Variant::V2,
+        &dyn_pairs(),
+        Some(Offset::new(ordered.len())),
+    );
+    print_dump("ordered:  ", ordered, &mut ordered_slices);
+    let mut orderless_slices = dump(
+        orderless,
+        Variant::V2,
+        &dyn_pairs(),
+        Some(Offset::new(orderless.len())),
+    );
+    print_dump("orderless:", orderless, &mut orderless_slices);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,12 +690,17 @@ fn derived_type_name_honours_the_policy() {
 }
 
 #[test]
-fn deserializing_a_non_envelop_is_unexpected_item() {
+fn deserializing_a_non_envelop_is_a_missing_envelop() {
     let pairs = pairs();
+    // `garbage` holds no limiter, so the whole 7-byte buffer is a NonEnvelop: the Envelop
+    // `deserialize` was fed is missing, and that is what the report says.
     assert_eq!(
         deserialize_one::<NoShortening, Named, _>(b"garbage", Variant::V1, &pairs, None, Global,)
             .err(),
-        Some(Error::UnexpectedItem),
+        Some(Error::MissingEnvelop {
+            required_by: None,
+            caught: (Offset::new(0), Offset::new(7)),
+        }),
     );
 }
 
@@ -561,12 +732,6 @@ struct TaggedList {
 #[cfg(feature = "vec")]
 #[test]
 fn heap_container_of_dyn_round_trips() {
-    use std::any::Any;
-
-    fn as_any<'a>(value: &'a (dyn MyTrait + 'static)) -> &'a (dyn Any + 'static) {
-        value
-    }
-
     let mut pairs = dyn_pairs();
     let value = TaggedList {
         tagged: vec![Box::new(Named { x: 1, y: true }), Box::new(Unit)],
@@ -1028,7 +1193,7 @@ fn fieldless_enum_variants_round_trip() {
             single_item_buffer_as_envelop_payload(&flat, Variant::V1, &pairs, None, Global)
         }
         .unwrap();
-        let items = items_of(payload, Variant::V1, &pairs, Global).unwrap();
+        let items = items_of(payload, Variant::V1, &pairs, Global);
         assert_eq!(items.len(), 1, "{value:?}");
         assert_eq!(items[0].head_offset().get(), 0, "{value:?}");
         assert!(

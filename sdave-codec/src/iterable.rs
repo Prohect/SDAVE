@@ -1,5 +1,5 @@
-//! `Serialize`/`Deserialize` for iterables: `Vec<T, A>`, slices `[T]` and fixed
-//! arrays `[T; N]`.
+//! The iterable wire shape: the primitive that frames one, and the impls for the
+//! slice `[T]` and the fixed-size array `[T; N]`.
 //!
 //! The crate `README.md` describes the wire shape of an iterable:
 //!
@@ -16,6 +16,11 @@
 //! The per-element logical slices cannot be kept in one fixed-size array, so they
 //! are stacked on native stack frames with [`Stack`] (no heap) and flattened in
 //! place once every element has been serialized.
+//!
+//! The heap containers (`Vec<T, A>`, `VecDeque<T>`, `LinkedList<T>`, `BTreeSet<T>`)
+//! are the same shape, so their `Serialize` impls come from the same
+//! `impl_iterable_serialize!` macro (in [`crate::impls::macros`]); their files are
+//! [`crate::impls::collections`].
 
 use core::{alloc::Allocator, cell::RefCell};
 
@@ -33,6 +38,10 @@ use crate::{
         write_type_signature,
     },
 };
+
+// `macro_rules!` is textually scoped, so the shape macros live in `impls::macros` and
+// are imported by path here.
+use crate::impls::macros::impl_iterable_serialize;
 
 /// Every iterable serialization is one outer Envelop:
 /// `[limiter, payload, delimiter]`.
@@ -75,6 +84,11 @@ where
 /// [`Serialize::serialize_typed`] call. This is the primitive underlying
 /// [`serialize_iterable`] and [`serialize_iterable_typed`].
 ///
+/// # Errors
+/// Returns [`Error::NoSerializableLimiterPair`] when no limiter pair can frame the
+/// region, plus whatever an element's own [`Serialize::serialize`] reports (the walk
+/// stops at the first failure and the half-serialized region is left unflattened).
+///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer[..payload_head]`
 /// MUST be a clean item boundary.
@@ -96,8 +110,9 @@ where
     // The leading empty marker Envelop: `[]` serializes to just this Envelop,
     // while `[""]` serializes to this Envelop followed by one empty element
     // Envelop. An empty payload is already in logical order, so no flattening is
-    // needed for it.
-    unsafe { frame_slice(buffer, &[], variant, strategy, limiter_pairs)? };
+    // needed for it, and the slices it reports are the region's own — the outer frame
+    // below replaces them.
+    let _ = unsafe { frame_slice(buffer, &[], variant, strategy, limiter_pairs)? };
     // Head of the (still unflattened) elements region.
     let unflattened_start = buffer.len();
 
@@ -216,6 +231,9 @@ where
 /// This is the shared body of the `Vec<T, A>` / `[T]` / `[T; N]` `serialize`
 /// impls, exposed for hand-written iterable-like impls.
 ///
+/// # Errors
+/// Returns what [`frame_iterable`] reports.
+///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer` MUST be a clean
 /// item boundary.
@@ -244,6 +262,9 @@ where
 ///
 /// This is the shared body of the `Vec<T, A>` / `[T]` / `[T; N]`
 /// `serialize_typed` impls, exposed for hand-written iterable-like impls.
+///
+/// # Errors
+/// Returns what [`write_type_signature`] and [`frame_iterable`] report.
 ///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer` MUST be a clean
@@ -277,68 +298,9 @@ where
     }
 }
 
-/// Implement [`Serialize`] for an iterable: the unsized slice `[T]` (so `&[T]` and
-/// `Box<[T], A>` reach it through the codec's `&T`/`Box<T, A>` forwarding) and the
-/// fixed-size array `[T; N]`.
-///
-/// An array carries the same wire shape as a slice — it is `[T]` with a statically
-/// known count — so the two impls differ only in their generic parameters, which is
-/// why `$policy` (the [`NamePolicy`] parameter name) is passed in: an array's const
-/// generic already claims `N`.
-/// `str` is deliberately NOT an iterable: it is the raw-text leaf shape.
-macro_rules! impl_iterable_serialize {
-    ($ty:ty, $policy:ident $(, const $N:ident)?) => {
-        impl<T, A $(, const $N: usize)?> Serialize<u8, A> for $ty
-        where
-            T: Serialize<u8, A> + TypeName,
-            <T as Serialize<u8, A>>::Slices: AsRef<[Option<(Offset, Offset)>]>,
-            A: Allocator + Clone,
-        {
-            const SLICES: usize = 3;
-            type Slices = IterableSlices;
-            type SlicesTyped = IterableSlices;
-
-            unsafe fn serialize<$policy: NamePolicy>(
-                &self,
-                buffer: &mut Vec<u8, A>,
-                variant: Variant,
-                strategy: Strategy,
-                limiter_pairs: &mut [LimiterPair<'_, u8, A>],
-            ) -> Result<Self::Slices, Error> {
-                unsafe {
-                    serialize_iterable::<$policy, T, A, _>(
-                        buffer,
-                        self.iter(),
-                        variant,
-                        strategy,
-                        limiter_pairs,
-                    )
-                }
-            }
-
-            unsafe fn serialize_typed<$policy: NamePolicy>(
-                &self,
-                buffer: &mut Vec<u8, A>,
-                name: Name,
-                variant: Variant,
-                strategy: Strategy,
-                limiter_pairs: &mut [LimiterPair<'_, u8, A>],
-            ) -> Result<Self::SlicesTyped, Error> {
-                unsafe {
-                    serialize_iterable_typed::<$policy, Self, T, A, _>(
-                        buffer,
-                        self.iter(),
-                        name,
-                        variant,
-                        strategy,
-                        limiter_pairs,
-                    )
-                }
-            }
-        }
-    };
-}
-
+// The slice is unsized and the array carries a statically known count, but the wire
+// shape is the same one the heap containers of `impls::collections` write, so all six
+// impls come from the shared macro.
 impl_iterable_serialize!([T], N);
 impl_iterable_serialize!([T; N], P, const N);
 
@@ -355,11 +317,14 @@ where
         final_buffer: Option<Offset>,
         allocator: A,
     ) -> Result<Self::Type, Error> {
-        let elements = unsafe {
+        let (elements, payload) = unsafe {
             deserialize_iterable_elements::<P, T, A>(deserializer, final_buffer, allocator)?
         };
         if elements.len() != N {
-            return Err(Error::UnexpectedItem);
+            return Err(Error::UnexpectedSignature {
+                valid_signatures: &["[T; N]"],
+                caught: payload,
+            });
         }
         // The length was checked above, so `next` is never `None` within `N` calls.
         let mut elements = elements.into_iter();

@@ -88,8 +88,13 @@ where
         final_buffer: Option<Offset>,
         _allocator: A,
     ) -> Result<Self::Type, Error> {
-        let payload = unsafe { envelop_payload(deserializer, final_buffer)? };
-        let text = core::str::from_utf8(payload).map_err(|_| Error::InvalidPayload)?;
+        let (buffer, caught) = unsafe { envelop_payload(deserializer, final_buffer)? };
+        let text = core::str::from_utf8(&buffer[caught.0.get()..caught.1.get()]).map_err(|_| {
+            Error::InvalidPayload {
+                r#type: "String",
+                caught,
+            }
+        })?;
         Ok(String::from(text))
     }
 }

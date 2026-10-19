@@ -11,8 +11,9 @@
 //!
 //! - `macros` — the `macro_rules!` helpers: one wire shape per macro, shared by the
 //!   types that spell it the same way;
-//! - `format` — the heap-free primitive formatter;
-//! - `channel` — everything that reads a buffer back;
+//! - `channel` — everything that reads a buffer back — and `format` — the heap-free
+//!   primitive formatter. Neither holds an impl, so both are re-exported here and
+//!   `crate::impls::…` keeps naming them;
 //! - `collections` — the feature-gated heap containers;
 //! - `option` / `result`, plus `tagged`, the one wire shape those two share;
 //! - `boxed`, `rc`, `arc`, `cow`, `cell` (which holds both `Cell` and `UnsafeCell`) and
@@ -22,7 +23,15 @@
 
 // Must come first: the macros it defines are invoked by the submodules below.
 #[macro_use]
-mod macros;
+pub(crate) mod macros;
+
+// The two helper groups that are not impls at all are their own files, re-exported
+// here so every `crate::impls::…` path keeps working.
+mod channel;
+mod format;
+
+pub use channel::*;
+pub use format::*;
 
 #[cfg(feature = "arc")]
 mod arc;
@@ -64,20 +73,6 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Submodules.
-//
-// The two helper groups that are not impls at all are their own files, re-exported
-// here so every `crate::impls::…` path keeps working: `format` is the heap-free
-// primitive formatter, `channel` is everything that reads a buffer back.
-// ---------------------------------------------------------------------------
-
-mod channel;
-mod format;
-
-pub use channel::*;
-pub use format::*;
-
-// ---------------------------------------------------------------------------
 // Primitives.
 //
 // Two groups, on opposite sides of the `primitive` feature:
@@ -98,10 +93,12 @@ pub use format::*;
 /// Implemented for the codec's readable primitives (the `primitive` feature); the
 /// integer impls distinguish a well-formed but out-of-range decimal
 /// ([`Error::ArithmeticOverflow`]) from a malformed one ([`Error::InvalidPayload`]).
+/// `caught` is the payload's absolute `(head, tail)` range, which an
+/// [`Error::InvalidPayload`] reports so the rejected text can be located.
 #[cfg(feature = "primitive")]
 pub trait ParsePrimitive: Sized {
-    /// Parse `text` into `Self`.
-    fn parse_primitive(text: &str) -> Result<Self, Error>;
+    /// Parse `text`, found at the absolute range `caught`, into `Self`.
+    fn parse_primitive(text: &str, caught: (Offset, Offset)) -> Result<Self, Error>;
 }
 
 #[cfg(feature = "primitive")]
@@ -109,7 +106,7 @@ macro_rules! impl_parse_primitive {
     (integer: $($t:ty),* $(,)?) => {
         $(
             impl ParsePrimitive for $t {
-                fn parse_primitive(text: &str) -> Result<Self, Error> {
+                fn parse_primitive(text: &str, caught: (Offset, Offset)) -> Result<Self, Error> {
                     match text.parse::<$t>() {
                         Ok(value) => Ok(value),
                         Err(error) => match error.kind() {
@@ -117,7 +114,10 @@ macro_rules! impl_parse_primitive {
                             | core::num::IntErrorKind::NegOverflow => {
                                 Err(Error::ArithmeticOverflow)
                             }
-                            _ => Err(Error::InvalidPayload),
+                            _ => Err(Error::InvalidPayload {
+                                r#type: stringify!($t),
+                                caught,
+                            }),
                         },
                     }
                 }
@@ -127,8 +127,11 @@ macro_rules! impl_parse_primitive {
     (plain: $($t:ty),* $(,)?) => {
         $(
             impl ParsePrimitive for $t {
-                fn parse_primitive(text: &str) -> Result<Self, Error> {
-                    text.parse::<$t>().map_err(|_| Error::InvalidPayload)
+                fn parse_primitive(text: &str, caught: (Offset, Offset)) -> Result<Self, Error> {
+                    text.parse::<$t>().map_err(|_| Error::InvalidPayload {
+                        r#type: stringify!($t),
+                        caught,
+                    })
                 }
             }
         )*
@@ -219,9 +222,13 @@ macro_rules! impl_primitive {
                     final_buffer: Option<Offset>,
                     _allocator: A,
                 ) -> Result<Self::Type, Error> {
-                    let payload = unsafe { envelop_payload(deserializer, final_buffer)? };
-                    let text = core::str::from_utf8(payload).map_err(|_| Error::InvalidPayload)?;
-                    <Self as ParsePrimitive>::parse_primitive(text)
+                    let (buffer, caught) = unsafe { envelop_payload(deserializer, final_buffer)? };
+                    let text = core::str::from_utf8(&buffer[caught.0.get()..caught.1.get()])
+                        .map_err(|_| Error::InvalidPayload {
+                            r#type: stringify!($t),
+                            caught,
+                        })?;
+                    <Self as ParsePrimitive>::parse_primitive(text, caught)
                 }
             }
         )*
@@ -289,7 +296,14 @@ where
     }
 }
 
-impl_deref_serialize!(&T, alloc::boxed::Box<T, A>);
+// ---------------------------------------------------------------------------
+// Pointer forwarding.
+//
+// A pointer has no wire shape of its own: `&T`, `Box<T, A>`, `Rc<T>`, `Arc<T>` and
+// `Cow<'_, B>` all serialize exactly like their referent, and render the referent's name
+// in a `Signature` too. The `Serialize` half below is always on; the rest of each
+// pointer's impls are its own feature-gated module (`boxed`/`rc`/`arc`/`cow`).
+// ---------------------------------------------------------------------------
 
 impl<T> TypeName for &T
 where
@@ -305,6 +319,11 @@ where
 {
     impl_type_name_forwarded!(T);
 }
+
+// The `Serialize` half of both pointers: the wire shape is the referent's, so a
+// `&T`/`Box<T, A>` field carries no marker of its own. `Box`'s `Deserialize` is the
+// `boxed` feature's, in `impls::boxed`.
+impl_deref_serialize!(&T, alloc::boxed::Box<T, A>);
 
 // ---------------------------------------------------------------------------
 // `()`.
@@ -353,11 +372,14 @@ where
         final_buffer: Option<Offset>,
         _allocator: A,
     ) -> Result<Self::Type, Error> {
-        let payload = unsafe { envelop_payload(deserializer, final_buffer)? };
-        if payload.is_empty() {
+        let (buffer, caught) = unsafe { envelop_payload(deserializer, final_buffer)? };
+        if buffer[caught.0.get()..caught.1.get()].is_empty() {
             Ok(())
         } else {
-            Err(Error::UnexpectedItem)
+            Err(Error::UnexpectedSignature {
+                valid_signatures: &["()"],
+                caught,
+            })
         }
     }
 }

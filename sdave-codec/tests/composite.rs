@@ -5,8 +5,8 @@
 //!
 //! - `Point`: the orderless composite — one `Signature` NonEnvelop + value Envelop
 //!   per field, read back by matching signatures. It frames with the public
-//!   primitives (`select_limiter_pair`, `append_frame`,
-//!   `single_item_buffer_as_envelop_payload`, `items_of`) rather than the derive.
+//!   primitives (`select_limiter_pair`, `append_frame`) and deframes with
+//!   `envelop_payload` + `collect_items`, rather than going through the derive.
 //! - `Word`: a `union`, which the codec refuses to derive — the application picks
 //!   a canonical member and writes both impls itself.
 //! - `ByteOffset`: a newtype whose wire form and invariant are its own, not its
@@ -35,7 +35,9 @@ mod common;
 use std::alloc::Global;
 use std::fmt::Write as _;
 
-use common::{flatten, from_text, many_pairs, pair, round_trip_no_eq, round_trip_with};
+use common::{
+    deserialize_one, flatten, from_text, many_pairs, pair, round_trip_no_eq, round_trip_with,
+};
 use sdave_codec::*;
 use sdave_derive::{Deserialize, Serialize};
 
@@ -151,7 +153,7 @@ impl Deserialize<u8, Global> for Point {
         final_buffer: Option<Offset>,
         allocator: Global,
     ) -> Result<Self::Type, Error> {
-        let payload = unsafe { envelop_payload(deserializer, final_buffer)? };
+        let (buffer, payload) = unsafe { envelop_payload(deserializer, final_buffer)? };
         // Two items per field, so the whole channel fits in a fixed array.
         let mut items: [Option<Item>; 4] = [None, None, None, None];
         unsafe {
@@ -168,23 +170,23 @@ impl Deserialize<u8, Global> for Point {
             if let (Some(Item::N { non_envelop }), Some(Item::E { envelop })) =
                 (&items[index], &items[index + 1])
             {
-                let name = &payload[non_envelop.head_offset.get()..non_envelop.tail_offset.get()];
-                let value_tail = envelop
-                    .tail_offset
-                    .unwrap_or(envelop.payload_tail_offset)
-                    .get();
-                let value = &payload[envelop.head_offset.get()..value_tail];
-                let final_value = Some(Offset::new(value.len()));
+                let name = &buffer[non_envelop.head_offset.get()..non_envelop.tail_offset.get()];
+                // The value Envelop's own frame, absolute in `buffer`; while its `V2`
+                // delimiter is unconfirmed it ends where the payload does.
+                let value = (
+                    envelop.head_offset,
+                    envelop.tail_offset.unwrap_or(payload.1),
+                );
                 if name == X_SIGNATURE {
                     x = Some(unsafe {
                         with_deserializer(deserializer, value, |channel| {
-                            u32::deserialize::<N>(channel, final_value, allocator)
+                            u32::deserialize::<N>(channel, Some(value.1), allocator)
                         })?
                     });
                 } else if name == Y_SIGNATURE {
                     y = Some(unsafe {
                         with_deserializer(deserializer, value, |channel| {
-                            u32::deserialize::<N>(channel, final_value, allocator)
+                            u32::deserialize::<N>(channel, Some(value.1), allocator)
                         })?
                     });
                 }
@@ -192,8 +194,14 @@ impl Deserialize<u8, Global> for Point {
             index += 2;
         }
         Ok(Point {
-            x: x.ok_or(Error::UnexpectedItem)?,
-            y: y.ok_or(Error::UnexpectedItem)?,
+            x: x.ok_or(Error::UnexpectedSignature {
+                valid_signatures: &["x: u32", "y: u32"],
+                caught: payload,
+            })?,
+            y: y.ok_or(Error::UnexpectedSignature {
+                valid_signatures: &["x: u32", "y: u32"],
+                caught: payload,
+            })?,
         })
     }
 }
@@ -462,6 +470,14 @@ impl ByteOffset {
     }
 }
 
+/// The report `ByteOffset` raises for the payload at `caught`.
+fn invalid_byte_offset(caught: (Offset, Offset)) -> Error {
+    Error::InvalidPayload {
+        r#type: "ByteOffset",
+        caught,
+    }
+}
+
 impl TypeName for ByteOffset {
     const FULL: &'static str = concat!(module_path!(), "::ByteOffset");
 }
@@ -482,11 +498,16 @@ impl Serialize<u8, Global> for ByteOffset {
         limiter_pairs: &mut [LimiterPair<'_, u8, Global>],
     ) -> Result<Self::Slices, Error> {
         // The marker plus at most 10 decimal digits of a `u32`; a `ByteOffset`
-        // never holds `u32::MAX`, so 11 bytes always suffice.
+        // never holds `u32::MAX`, so 11 bytes always suffice. A failure would mean the
+        // reserved bound is wrong, which is what `caught` points at.
+        let overflow = || Error::InvalidPayload {
+            r#type: "ByteOffset",
+            caught: (Offset::new(0), Offset::new(11)),
+        };
         let mut text = StackBuf::<11>::new();
         text.write_char(OFFSET_MARKER as char)
-            .map_err(|_| Error::InvalidPayload)?;
-        write!(text, "{}", self.0).map_err(|_| Error::InvalidPayload)?;
+            .map_err(|_| overflow())?;
+        write!(text, "{}", self.0).map_err(|_| overflow())?;
         unsafe { frame_slice(buffer, text.as_bytes(), variant, strategy, limiter_pairs) }
     }
 
@@ -522,13 +543,14 @@ impl Deserialize<u8, Global> for ByteOffset {
         final_buffer: Option<Offset>,
         _allocator: Global,
     ) -> Result<Self::Type, Error> {
-        let payload = unsafe { envelop_payload(deserializer, final_buffer)? };
-        let text = core::str::from_utf8(payload).map_err(|_| Error::InvalidPayload)?;
+        let (buffer, caught) = unsafe { envelop_payload(deserializer, final_buffer)? };
+        let text = core::str::from_utf8(&buffer[caught.0.get()..caught.1.get()])
+            .map_err(|_| invalid_byte_offset(caught))?;
         let digits = text
             .strip_prefix(OFFSET_MARKER as char)
-            .ok_or(Error::InvalidPayload)?;
-        let offset: u32 = digits.parse().map_err(|_| Error::InvalidPayload)?;
-        ByteOffset::new(offset).ok_or(Error::InvalidPayload)
+            .ok_or_else(|| invalid_byte_offset(caught))?;
+        let offset: u32 = digits.parse().map_err(|_| invalid_byte_offset(caught))?;
+        ByteOffset::new(offset).ok_or_else(|| invalid_byte_offset(caught))
     }
 }
 
@@ -561,14 +583,21 @@ fn a_newtype_writes_its_own_payload_and_validates_it() {
 
     // ...and enforces on the way in the invariant the inner type cannot express.
     assert_eq!(from_text::<ByteOffset>("@7", &pairs), Ok(ByteOffset(7)));
+    // The framing is 2 limiter bytes then the payload, so `@4294967295` sits at `[2, 13)`.
     assert_eq!(
         from_text::<ByteOffset>("@4294967295", &pairs),
-        Err(Error::InvalidPayload),
+        Err(Error::InvalidPayload {
+            r#type: "ByteOffset",
+            caught: (Offset::new(2), Offset::new(13)),
+        }),
         "`u32::MAX` is the no-offset sentinel",
     );
     assert_eq!(
         from_text::<ByteOffset>("12", &pairs),
-        Err(Error::InvalidPayload),
+        Err(Error::InvalidPayload {
+            r#type: "ByteOffset",
+            caught: (Offset::new(2), Offset::new(4)),
+        }),
         "the marker is part of the wire form",
     );
 }

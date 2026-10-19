@@ -14,9 +14,9 @@
 //! carry any number of them. `Option`/`Result` carry exactly one value, so they nest
 //! it directly and the tag stays a plain name.
 //!
-//! Both modules go through the three helpers below — [`frame_tagged`] writes the shape,
-//! [`tagged_parts`] splits a deframed payload into tag and value, [`decode_tagged_value`]
-//! decodes that value — so the shape lives in exactly one place.
+//! Both modules go through the same helpers — [`frame_tagged`] writes the shape, and
+//! [`read_tagged`] (over [`tagged_parts`]) splits a deframed payload into tag and value,
+//! which [`decode_tagged_value`] then decodes — so the shape lives in exactly one place.
 
 use core::alloc::Allocator;
 
@@ -27,7 +27,7 @@ use sdave::{FlatDeserializer, Item, LimiterPair, Offset, Variant};
 use crate::{
     Error,
     deserialize::Deserialize,
-    impls::{collect_items, envelop_payload, with_deserializer},
+    impls::{Deframed, collect_items, envelop_payload, with_deserializer},
     name::NamePolicy,
     serialize::{Serialize, Strategy, flatten_in_place, frame_region},
 };
@@ -37,6 +37,9 @@ use crate::{
 ///
 /// The payload is flattened in place, so the tag NonEnvelop and the value Envelop
 /// occupy one contiguous region like any other leaf value.
+///
+/// # Errors
+/// Returns what the value's own `serialize` and [`frame_region`] report.
 ///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer` MUST be a clean
@@ -60,35 +63,81 @@ where
     let inner = unsafe {
         <T as Serialize<u8, A>>::serialize::<N>(value, buffer, variant, strategy, limiter_pairs)?
     };
-    unsafe { flatten_in_place(buffer, head, [name].into_iter().chain(inner)) };
+    // The tag and the value are one contiguous payload from here on, so the flattened
+    // length the helper reports is not needed.
+    let _ = unsafe { flatten_in_place(buffer, head, [name].into_iter().chain(inner)) };
     unsafe { frame_region(buffer, head, variant, strategy, limiter_pairs) }
 }
 
-/// Deframe the payload `payload` of the tagged Envelop `deserializer` frames into
-/// its variant `tag` and its value bytes (the value Envelop's whole frame, ready to
-/// be deserialized).
+/// A deframed tagged-value payload: the variant tag, and the value Envelop behind it.
 ///
-/// The value is `None` when the payload holds no value Envelop after the tag,
-/// which is how a payload-less variant such as `Option::None` is written.
+/// Every offset here is absolute in [`Tagged::buffer`], the raw buffer the tagged
+/// Envelop was deframed from.
+pub(crate) struct Tagged<'a, T> {
+    /// The raw buffer every range below indexes.
+    pub(crate) buffer: &'a [T],
+    /// The variant tag — the payload's leading `NonEnvelop` — as absolute `(head, tail)`
+    /// offsets.
+    pub(crate) tag_range: (Offset, Offset),
+    /// The tagged payload as a whole: where a value Envelop that is missing was looked
+    /// for. See [`Tagged::value_envelop_range`].
+    pub(crate) payload: (Offset, Offset),
+    /// The value Envelop's absolute `(head, tail)` frame, absent for a payload-less
+    /// variant such as `Option::None`.
+    pub(crate) value: Option<(Offset, Offset)>,
+}
+
+impl<'a, T> Tagged<'a, T> {
+    /// The tag's bytes.
+    pub(crate) fn tag(&self) -> &'a [T] {
+        &self.buffer[self.tag_range.0.get()..self.tag_range.1.get()]
+    }
+
+    /// The range the value Envelop is required in: from the tag's tail to the end of this
+    /// payload. It is what [`Error::MissingEnvelop`] reports as `caught` when the value is
+    /// absent.
+    pub(crate) fn value_envelop_range(&self) -> (Offset, Offset) {
+        (self.tag_range.1, self.payload.1)
+    }
+
+    /// The value Envelop's frame, or [`Error::MissingEnvelop`] naming the tag that required
+    /// it.
+    ///
+    /// A payload-less variant such as `Option::None` never calls this: its tag is complete
+    /// on its own, and the absent value is the answer rather than a fault.
+    pub(crate) fn value_envelop(&self) -> Result<(Offset, Offset), Error> {
+        self.value.ok_or(Error::MissingEnvelop {
+            required_by: Some(self.tag_range),
+            caught: self.value_envelop_range(),
+        })
+    }
+}
+
+/// Deframe the tagged payload `deframed` — the payload of the Envelop `deserializer` is
+/// positioned on — into its variant tag and its value frame.
 ///
-/// Only the first two items matter, so the channel walk stores them in a fixed-size
-/// array: no `Vec<Item>` is allocated.
+/// The value is `None` when the payload holds no value Envelop after the tag, which is how
+/// a payload-less variant such as `Option::None` is written.
+///
+/// Only the first two items matter, so the channel walk stores them in a fixed-size array:
+/// no `Vec<Item>` is allocated.
 ///
 /// # Errors
-/// Returns [`Error::UnexpectedItem`] when `payload` does not start with a
+/// Returns [`Error::UnexpectedSignature`] when the payload does not start with a
 /// `NonEnvelop` tag.
 ///
 /// # Safety
-/// Same contract as [`Deserialize::deserialize`](crate::Deserialize::deserialize): `payload`
+/// Same contract as [`Deserialize::deserialize`](crate::Deserialize::deserialize): `deframed`
 /// MUST be the payload of the Envelop `deserializer` is positioned on.
 pub(crate) unsafe fn tagged_parts<'a, 'l, T, A>(
     deserializer: &mut FlatDeserializer<'a, 'l, T, A>,
-    payload: &'a [T],
-) -> Result<(&'a [T], Option<&'a [T]>), Error>
+    deframed: Deframed<'a, T>,
+) -> Result<Tagged<'a, T>, Error>
 where
     T: Clone + PartialEq + Sized,
     A: Allocator + Clone,
 {
+    let (buffer, payload) = deframed;
     let mut slots: [Option<Item>; 2] = [None, None];
     unsafe {
         with_deserializer(deserializer, payload, |channel| {
@@ -97,21 +146,31 @@ where
         })?;
     }
     let Some(Item::N { non_envelop }) = &slots[0] else {
-        return Err(Error::UnexpectedItem);
+        return Err(Error::UnexpectedSignature {
+            valid_signatures: &["NonEnvelop"],
+            caught: slots[0].as_ref().map_or(payload, |item| {
+                (item.head_offset(), item.semantical_tail_offset())
+            }),
+        });
     };
-    let tag = &payload[non_envelop.head_offset.get()..non_envelop.tail_offset.get()];
+    let tag_range = (non_envelop.head_offset, non_envelop.tail_offset);
     let value = match &slots[1] {
-        Some(Item::E { envelop }) => {
-            let tail = envelop.tail_offset.map_or(payload.len(), |tail| tail.get());
-            Some(&payload[envelop.head_offset.get()..tail])
-        }
+        Some(Item::E { envelop }) => Some((
+            envelop.head_offset,
+            envelop.tail_offset.unwrap_or(payload.1),
+        )),
         _ => None,
     };
-    Ok((tag, value))
+    Ok(Tagged {
+        buffer,
+        tag_range,
+        payload,
+        value,
+    })
 }
 
 /// Deframe the value `deserializer` is positioned on as one tagged Envelop,
-/// returning its variant `tag` and its value bytes.
+/// returning its [`Tagged`] parts.
 ///
 /// This is the read half of the tagged-variant shape — deframe the single Envelop,
 /// then split its payload with [`tagged_parts`] — factored out because `Option` and
@@ -122,27 +181,27 @@ where
 pub(crate) unsafe fn read_tagged<'a, 'l, T, A>(
     deserializer: &mut FlatDeserializer<'a, 'l, T, A>,
     final_buffer: Option<Offset>,
-) -> Result<(&'a [T], Option<&'a [T]>), Error>
+) -> Result<Tagged<'a, T>, Error>
 where
     T: Clone + PartialEq + Sized,
     A: Allocator + Clone,
 {
-    let payload = unsafe { envelop_payload(deserializer, final_buffer)? };
-    unsafe { tagged_parts(deserializer, payload) }
+    let deframed = unsafe { envelop_payload(deserializer, final_buffer)? };
+    unsafe { tagged_parts(deserializer, deframed) }
 }
 
-/// Decode `value` — the value bytes [`tagged_parts`] handed back — as `V`.
+/// Decode `value` — the value frame [`tagged_parts`] handed back — as `V`.
 ///
-/// The bytes are one whole Envelop, so the value is decoded straight from them and
+/// The frame is one whole Envelop, so the value is decoded straight from it and
 /// through the enclosing deserializer's recycled storage: a tagged variant adds one
 /// nesting level, not one set of `Vec`s.
 ///
 /// # Safety
 /// Same contract as [`Deserialize::deserialize`](crate::Deserialize::deserialize), and
-/// `value` MUST be a sub-slice of `deserializer.buffer()` holding one value Envelop.
+/// `value` MUST be a sub-range of `deserializer.buffer()` holding one value Envelop.
 pub(crate) unsafe fn decode_tagged_value<'a, 'l, N, V, T, A>(
     deserializer: &mut FlatDeserializer<'a, 'l, T, A>,
-    value: &'a [T],
+    value: (Offset, Offset),
     allocator: A,
 ) -> Result<V, Error>
 where
@@ -151,13 +210,11 @@ where
     T: Clone + PartialEq + Sized,
     A: Allocator + Clone,
 {
+    // The child reads `buffer[..value.1]`, so the value's tail is its final length.
+    let final_value = value.1;
     unsafe {
         with_deserializer(deserializer, value, |channel| {
-            <V as Deserialize<T, A>>::deserialize::<N>(
-                channel,
-                Some(Offset::new(value.len())),
-                allocator,
-            )
+            <V as Deserialize<T, A>>::deserialize::<N>(channel, Some(final_value), allocator)
         })
     }
 }

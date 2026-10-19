@@ -11,7 +11,8 @@ use quote::{format_ident, quote};
 use syn::{ItemTrait, Type, TypeParamBound, punctuated::Punctuated, token::Comma};
 
 use crate::{
-    allocator_ident, payload_and_items, policy_ident, serialize_typed_method, slices_type,
+    allocator_ident, payload_and_items, policy_ident, serialize_typed_method, signature_range,
+    slices_type, unexpected_signature,
 };
 
 /// Whether `bound` is `Any`, i.e. a trait bound whose last path segment is `Any`
@@ -27,7 +28,26 @@ pub fn is_any_bound(bound: &TypeParamBound) -> bool {
         .is_some_and(|segment| segment.ident == "Any")
 }
 
+/// The claimed concrete types' `TypeName::FULL` names as one
+/// `&'static [&'static str]`, bound to `__SDAVE_SIGNATURES` in the function body it is
+/// emitted into.
+///
+/// Every claimed type is a valid signature of a `dyn` channel, so a report that matched
+/// none of them names them all. A named `const` item (rather than an inline `&[..]`) keeps
+/// an associated const out of a promoted temporary.
+fn signatures_const(types: &[&Type]) -> TokenStream2 {
+    quote! {
+        const __SDAVE_SIGNATURES: &[&'static str] =
+            &[#(<#types as ::sdave_codec::TypeName>::FULL),*];
+    }
+}
+
 /// Generate the `dyn Trait` codec impls for a `#[sdave_dyn]`-annotated trait.
+///
+/// # Errors
+/// Returns an error when the trait is generic, or when the attribute claims no concrete
+/// type: both leave nothing to (de)serialize, so they are refused at compile time rather
+/// than emitting an impl that can never match.
 pub fn expand_sdave_dyn(
     types: &Punctuated<Type, Comma>,
     mut item: ItemTrait,
@@ -67,6 +87,20 @@ pub fn expand_sdave_dyn(
     let deserializer = quote!(__sdave_deserializer);
     // The payload is `NonEnvelop(concrete type name) ++ Envelop(value)`: one item to collect.
     let payload = payload_and_items(&deserializer, &quote!(final_buffer), 1);
+    let signatures = signatures_const(&types);
+    // What a `dyn` value reports when its concrete type cannot be claimed: the accepted type
+    // names, plus the range caught — nothing appended yet (serialize), the payload that held
+    // no tag, or the tag that matched nothing claimed.
+    let valid_signatures = quote!(__SDAVE_SIGNATURES);
+    let unclaimed_here = unexpected_signature(
+        &valid_signatures,
+        &quote!((
+            ::sdave_codec::Offset::new(buffer.len()),
+            ::sdave_codec::Offset::new(buffer.len()),
+        )),
+    );
+    let missing_tag = unexpected_signature(&valid_signatures, &quote!(__sdave_payload));
+    let unclaimed_tag = unexpected_signature(&valid_signatures, &signature_range());
     let serialize_typed = serialize_typed_method(&allocator, &policy);
     let slices = slices_type(&quote!(3));
     let slices_typed = slices_type(&quote!(6));
@@ -137,7 +171,8 @@ pub fn expand_sdave_dyn(
                         };
                     }
                 )*
-                ::core::result::Result::Err(::sdave_codec::Error::UnexpectedItem)
+                #signatures
+                ::core::result::Result::Err(#unclaimed_here)
             }
 
             #serialize_typed
@@ -157,16 +192,22 @@ pub fn expand_sdave_dyn(
                 allocator: #allocator,
             ) -> ::core::result::Result<Self::Type, ::sdave_codec::Error> {
                 #payload
+                // Every claimed concrete type is a valid signature of this channel, so a
+                // tag matching none of them reports them all.
+                #signatures
                 let ::core::option::Option::Some(::sdave_codec::Item::N { non_envelop }) =
                     &__sdave_items[0]
                 else {
-                    return ::core::result::Result::Err(::sdave_codec::Error::UnexpectedItem);
+                    return ::core::result::Result::Err(#missing_tag);
                 };
                 let __sdave_name =
-                    &__sdave_payload[non_envelop.head_offset.get()..non_envelop.tail_offset.get()];
+                    &__sdave_buffer[non_envelop.head_offset.get()..non_envelop.tail_offset.get()];
                 #(
                     if ::sdave_codec::render_matches::<#policy, #types>(__sdave_name) {
-                        let __sdave_value = &__sdave_payload[non_envelop.tail_offset.get()..];
+                        // The concrete value's Envelop: from the tag's tail to the end of
+                        // this payload (which is where a `Variant::V2` delimiter would
+                        // still be unconfirmed).
+                        let __sdave_value = (non_envelop.tail_offset, __sdave_payload.1);
                         let __sdave_concrete = unsafe {
                             ::sdave_codec::with_deserializer(
                                 #deserializer,
@@ -174,9 +215,7 @@ pub fn expand_sdave_dyn(
                                 |__sdave_concrete_deserializer| {
                                     <#types as ::sdave_codec::Deserialize<u8, #allocator>>::deserialize::<#policy>(
                                         __sdave_concrete_deserializer,
-                                        ::core::option::Option::Some(::sdave_codec::Offset::new(
-                                            __sdave_value.len(),
-                                        )),
+                                        ::core::option::Option::Some(__sdave_value.1),
                                         allocator.clone(),
                                     )
                                 },
@@ -187,7 +226,8 @@ pub fn expand_sdave_dyn(
                         return ::core::result::Result::Ok(__sdave_boxed);
                     }
                 )*
-                ::core::result::Result::Err(::sdave_codec::Error::UnexpectedItem)
+                // The concrete type name matched nothing claimed.
+                ::core::result::Result::Err(#unclaimed_tag)
             }
         }
     })

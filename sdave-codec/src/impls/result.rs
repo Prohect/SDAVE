@@ -82,8 +82,10 @@ where
         final_buffer: Option<Offset>,
         allocator: A,
     ) -> Result<Self::Type, Error> {
-        let (tag, value) = unsafe { tagged::read_tagged(deserializer, final_buffer)? };
-        let value = value.ok_or(Error::UnexpectedItem)?;
+        let tagged = unsafe { tagged::read_tagged(deserializer, final_buffer)? };
+        let tag = tagged.tag();
+        // Both tags require their value Envelop right behind them.
+        let value = tagged.value_envelop()?;
         if tag == OK {
             Ok(Ok(unsafe {
                 tagged::decode_tagged_value::<N, T, _, A>(deserializer, value, allocator)?
@@ -93,7 +95,10 @@ where
                 tagged::decode_tagged_value::<N, E, _, A>(deserializer, value, allocator)?
             }))
         } else {
-            Err(Error::UnexpectedItem)
+            Err(Error::UnexpectedSignature {
+                valid_signatures: &["Ok", "Err"],
+                caught: tagged.tag_range,
+            })
         }
     }
 }

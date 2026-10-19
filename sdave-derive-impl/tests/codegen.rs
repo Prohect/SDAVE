@@ -294,13 +294,23 @@ fn constructor_builds_named_and_tuple_values() {
             x: u32,
         }
     ));
-    let named = compact(constructor(&quote!(Self), &named, true));
+    let named = compact(constructor(
+        &quote!(Self),
+        &named,
+        true,
+        &quote!(__sdave_payload),
+    ));
     assert!(named.starts_with("Self{x:__sdave_field_0.ok_or"), "{named}");
 
     let tuple = field_infos(&parse_quote!(
         struct S(u32, bool);
     ));
-    let tuple = compact(constructor(&quote!(Self), &tuple, false));
+    let tuple = compact(constructor(
+        &quote!(Self),
+        &tuple,
+        false,
+        &quote!(__sdave_payload),
+    ));
     assert!(tuple.starts_with("Self(__sdave_field_0.ok_or"), "{tuple}");
 }
 
@@ -327,6 +337,24 @@ fn sdave_dyn_seals_the_trait() {
     let tokens = compact(expand_sdave_dyn(&types, item).unwrap());
     assert!(tokens.contains("__SdaveDynClaim_Tagged"), "{tokens}");
     assert!(tokens.contains("::core::any::Any"), "{tokens}");
+    // A `dyn` value that matches no claimed type is reported as `UnexpectedSignature` with
+    // the signatures that would have matched, so the report is a struct variant (never the
+    // bare unit form), and both impls name every claimed type as one `const` slice.
+    assert!(
+        tokens.contains(
+            "const__SDAVE_SIGNATURES:&[&'staticstr]=&[<u32as::sdave_codec::TypeName>::FULL];"
+        ),
+        "{tokens}"
+    );
+    // All three reports do: the serialize fallback, the missing tag, and the concrete type
+    // name that matched nothing claimed.
+    assert_eq!(
+        tokens
+            .matches("Error::UnexpectedSignature{valid_signatures:__SDAVE_SIGNATURES,")
+            .count(),
+        3,
+        "{tokens}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +573,12 @@ fn a_positional_field_may_be_skipped() {
     let infos = field_infos(&parse_quote!(
         struct S(u32, #[skip(9)] u32, u32);
     ));
-    let tokens = compact(constructor(&quote!(Self), &infos, false));
+    let tokens = compact(constructor(
+        &quote!(Self),
+        &infos,
+        false,
+        &quote!(__sdave_payload),
+    ));
     assert!(
         tokens.contains("__sdave_field_1.unwrap_or_else(||9)"),
         "{tokens}"
@@ -609,9 +642,19 @@ fn a_missing_field_takes_its_fallback_in_the_constructor() {
             secret: u32,
         }
     ));
-    let tokens = compact(constructor(&quote!(Self), &infos, true));
-    // The mandatory field still errors when absent.
+    let tokens = compact(constructor(
+        &quote!(Self),
+        &infos,
+        true,
+        &quote!(__sdave_payload),
+    ));
+    // The mandatory field still errors when absent, reporting the signatures this
+    // channel would have accepted (a `#[skip]`ped one never reaches the wire).
     assert!(tokens.contains("id:__sdave_field_0.ok_or("), "{tokens}");
+    assert!(
+        tokens.contains("valid_signatures:&[\"id\",\"port\"]"),
+        "{tokens}"
+    );
     // Both attribute kinds fall back instead.
     assert!(
         tokens.contains("port:__sdave_field_1.unwrap_or_else(||8080)"),

@@ -30,35 +30,35 @@ grow with document size or nesting depth.
 | allocation                                          | when                                                                                                                                                                                                    | size                                                                                             |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | the value the caller asked for                      | always, when that value owns heap storage (`Vec<T, A>`, `Box`, `String`, `Cow`'s owned form, `Rc`/`Arc`, `BTreeSet` nodes, …)                                                                           | proportional to the data                                                                         |
-| a `FlatDeserializer`'s three `Vec`s                 | once per **top-level** deserialize (`flat_deserializer`/`deserialize_one`), or once per buffer-taking convenience call (`items_of`, `single_item_buffer_as_envelop_payload`, `iterable_element_ranges`) | `limiter_pairs` + a `repeat_map` entry per pair, plus the archived boundaries **it** accumulates |
-| iterable element **ranges**                         | once per iterable deserialize (`Vec`'s, `[T; N]`'s, …)                                                                                                                                                  | one `(head, tail)` per element                                                                   |
+| a `FlatDeserializer`'s three `Vec`s                 | once per **top-level** deserialize — the caller builds the one instance (`FlatDeserializer::new`); nesting never builds another                                                                          | `limiter_pairs` + a `repeat_map` entry per pair, plus the archived boundaries **it** accumulates |
+| `[T; N]`'s element list                             | once per array deserialize (`deserialize_iterable_elements`); the heap containers push straight into their own container and skip it                                                                     | one `T` per element                                                                              |
+| the ranges and slices of an iterable (`Stack`)      | never — both directions keep one frame per element on native stack frames                                                                                                                               | —                                                                                                |
 | the flatten scratch of an iterable `serialize`      | never — the bytes are appended to the caller's buffer and flattened in place                                                                                                                            | —                                                                                                |
-| the slice list of an iterable `serialize` (`Stack`) | never — one `Slices` per element lives on native stack frames                                                                                                                                           | —                                                                                                |
 
 ### What does not
 
 - **Nesting is free.** `Deserialize::deserialize` takes the deserializer by `&mut`, and every level that
-  needs a deserializer over a sub-slice of the same buffer borrows its parent's three `Vec`s with
+  needs a deserializer over a sub-frame of the same buffer borrows its parent's three `Vec`s with
   `with_deserializer`, which hands them back on return (see [Deserializer plumbing](#deserializer-plumbing)).
-  A document nested ten levels deep therefore costs the same three `Vec`s as a flat one (plus, at each
-  _iterable_ level, the one range list below). On ascent the scan cache is cleared
-  (`update_internal_cache(.., None)`) and a partially scanned item is rewound to its last settled
-  boundary — the rescan is the price of reuse, and it is bounded by the value being read.
+  A document nested ten levels deep therefore costs the same three `Vec`s as a flat one. On ascent the scan
+  cache is cleared (`update_internal_cache(.., None)`) and a partially scanned item is rewound to its last
+  settled boundary — the rescan is the price of reuse, and it is bounded by the value being read.
 - **Field/item lists are not collected.** A derived type knows that its channel holds exactly one
   `NonEnvelop` signature plus one `Envelop` value per _encoded_ field — and, for a positional shape, one
   `Envelop` value alone — so the generated reader collects the items into a fixed-size
   `[Option<Item>; n]` array (`collect_items`) instead of a `Vec<Item>`. The same is true of
   `Option`/`Result`'s tag/value split (a 2-slot array).
-- **An iterable's element slices are not collected.** Serializing `Vec<T, A>`, `[T]` or `[T; N]` walks the
-  elements onto native stack frames with the core's `Stack`, then flattens the region in place with one
-  move, so a compile-time-unsized number of `Slices` never becomes a heap list. `str` is not an iterable:
-  its payload already is the bytes.
+- **An iterable's elements are stacked, not listed — in both directions.** Serializing `Vec<T, A>`, `[T]` or
+  `[T; N]` walks the elements onto native stack frames with the core's `Stack`, then flattens the region in
+  place with one move, so a compile-time-unsized number of `Slices` never becomes a heap list; deserializing
+  one stacks the element ranges the same way, one frame per channel item, and decodes them off that stack. A
+  placeholder frame (`Some(None)`) stands for a channel item that is not a complete range — the marker
+  Envelop, the `Signature`, and the first element, whose tail is the next item's head — which keeps `None`
+  free as `Stack`'s stop signal. `str` is not an iterable: its payload already is the bytes.
 
-Inside a `deserialize` call, the only internal allocation left is the iterable element _range_ list
-(one per iterable value, not per nesting level): the element count is unbounded, so it cannot live in a
-fixed-size array, and the walk has to finish before the first element is decoded (the tail of element `k`
-is the head of element `k + 1`). It holds two `usize`s per element and is dropped as soon as the elements
-are deserialized.
+Inside a `deserialize` call there is no allocation for the traversal at all: a nested value reuses its
+parent's three `Vec`s, and an iterable's ranges live on native frames. The one intermediate element list left
+is `[T; N]`'s, which is built after the count is known and handed back inside the array.
 
 ## The serialize/deserialize contract
 
@@ -77,8 +77,10 @@ value's bytes), a `final_buffer: Option<Offset>` flag and the allocator. The fla
 trait method itself: `Some(offset)` is the caller's promise that the buffer is complete (asserting
 `offset == deserializer.buffer().len()`), which is the only way to accept a `Variant::V2` Envelop whose
 delimiter slice has no following non-delimiter byte; `None` rejects such an Envelop with
-`Error::UnconfirmedDelimiter`. Internal recursive deserialization always passes the flag for the bounded
-sub-slice it hands down, so nested `Variant::V2` Envelops are handled gracefully.
+`Error::UnconfirmedDelimiter`. Internal recursive deserialization always hands a child the raw prefix
+`buffer[..tail]` of its own buffer plus the frame it is to read, so the child's `buffer().len()` *is* the
+value's tail and it always receives `Some(tail)` — nested `Variant::V2` Envelops are handled gracefully,
+and every offset any level reports is absolute in the origin buffer.
 
 Every `Signature` type text is rendered through a `NamePolicy` method parameter: each type provides its
 full qualified name (ignoring generic arguments) via `TypeName`, and the policy decides which names it
@@ -314,28 +316,32 @@ fn deserialize<N: NamePolicy>(
 ```
 
 The allocator stays a parameter because a value that _is_ heap storage has to be built in it and handed
-back. An impl MUST treat the deserializer as lent: descend into sub-slices with `with_deserializer`, never
+back. An impl MUST treat the deserializer as lent: descend into sub-frames with `with_deserializer`, never
 replace its buffer with anything outside the bytes it was given, and leave it positioned after the value
-it consumed. Its item cache may be cleared on return, so a caller MUST NOT resume a channel walk on the
-same deserializer across a `deserialize` call.
+it consumed. Its item cache may be cleared on return, so a walk over that deserializer MUST NOT be resumed
+after a nested call.
 
 The helpers an impl is built from, all `pub`:
 
-| helper                                                                                | what it does                                                                                                                                                                                                         |
-| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `envelop_payload(&mut FlatDeserializer, final_buffer)`                                | drives the one Envelop the deserializer is positioned on and returns its payload slice                                                                                                                               |
-| `with_deserializer(&mut FlatDeserializer, sub_slice, consumer)`                       | lends the three `Vec`s to a deserializer over `sub_slice`; on return it restores the parent's position with them and leaves the parent's scan cache cleared (a partial scan is rewound to its last settled boundary) |
-| `collect_items(&mut FlatDeserializer, &mut [Option<Item>])`                           | walks a channel into a caller-sized fixed array, returning the item count                                                                                                                                            |
-| `visit_iterable_elements(..)` / `deserialize_iterable_elements(..)`                   | the iterable element walk (ranges first, then one decode per element through the recycled storage)                                                                                                                   |
-| `iterable_element_ranges(..)`                                                         | the same walk, collecting the ranges only                                                                                                                                                                            |
-| `flat_deserializer(buffer, variant, limiter_pairs, &allocator)`                       | builds a `FlatDeserializer` (three `Vec`s) over a whole buffer                                                                                                                                                       |
-| `deserialize_one::<N, D, A>(buffer, variant, limiter_pairs, final_buffer, allocator)` | one-shot: `flat_deserializer` + `D::deserialize` — the entry point for a caller that owns the buffer                                                                                                                 |
-| `single_item_buffer_as_envelop_payload(..)` / `items_of(..)`                          | the buffer-taking conveniences: each builds its own `FlatDeserializer`, so a nested impl should prefer `envelop_payload`/`collect_items`                                                                             |
+| helper                                                                                     | what it does                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `envelop_payload(&mut FlatDeserializer, final_buffer)`                                     | drives the one Envelop the deserializer is positioned on and returns a `Deframed`: the raw buffer it read, plus the payload's absolute `(head, tail)` frame                                                                                         |
+| `with_deserializer(&mut FlatDeserializer, frame, consumer)`                                | lends the three `Vec`s to a deserializer over the raw prefix `buffer[..frame.1]` that starts its channel at `frame.0`; on return it restores the parent's position with them and leaves the parent's scan cache cleared (a partial scan is rewound to its last settled boundary). The child owns what it was lent, so it may itself be used as a parent once its own channel walk has finished                                                                                                                                                    |
+| `collect_items(&mut FlatDeserializer, &mut [Option<Item>])`                                | walks a channel into a caller-sized fixed array, returning the item count (item `0` is the frame marker, not an item)                                                                                                                                |
+| `for_each_element_range(&mut FlatDeserializer, payload, visit)`                            | the iterable element walk — the one place a payload is split into element ranges; `visit_iterable_elements` builds on it, and a caller that wants the ranges without decoding collects them itself. The ranges live on native stack frames (`Stack`), one frame per channel item, with a placeholder frame for an item that is not a complete range                                                                     |
+| `visit_iterable_elements(..)` / `deserialize_iterable_elements(..)`                        | the iterable element walk (ranges stacked, then one decode per element through the recycled storage)                                                                                                                                                 |
 
 A hand-written `Serialize`/`Deserialize` pair therefore looks like:
 `frame_slice` out, `envelop_payload` + `collect_items` in, and `with_deserializer` for every nested value.
 `sdave-codec/tests/composite.rs` is a worked example (`Point`, `Word`, `ByteOffset`); the derive emits the
 same shape, with the item array sized exactly to its own field count.
+
+Note what the list does *not* contain: nothing builds or drives a deserializer for you. Building the one
+`FlatDeserializer` over a finished buffer is the caller's step (`FlatDeserializer::new`, or a builder of
+your own around it), and everything after that is lent. The one-shot drivers a buffer-owning caller might
+want — `flat_deserializer`, `deserialize_one`, `items_of`, `single_item_buffer_as_envelop_payload`,
+`iterable_element_ranges` — each build a deserializer of their own, so they live in
+`sdave-codec/tests/common/mod.rs` rather than in the crate.
 
 ## Capability boundary
 
@@ -445,16 +451,34 @@ sdave-codec = { version = "0.5", default-features = false, features = ["vec"] }
 
 ### Malformed buffers
 
-A malformed buffer never panics; it maps to a distinct `Error`:
+A malformed buffer never panics; it maps to a distinct `Error`, and every variant that describes
+malformed data carries the absolute `(head, tail)` offsets of what it caught — a nested reader sees a raw
+prefix of the very buffer its parent sees, so those offsets never have to be re-based by the caller.
+An *empty* `limiter_pairs` set is not a document fault and so has no variant: building a
+`FlatDeserializer` with one panics (core's `FlatDeserializer::new` contract).
 
-- `EmptyLimiterPairs` — the given `limiter_pairs` set is empty.
-- `NoSerializableLimiterPair` — no pair could frame the payload under the strategy.
-- `UnexpectedItem` — the buffer is not the expected Envelop / signature / value.
-- `UnconfirmedDelimiter` — a `Variant::V2` Envelop's delimiter is unconfirmed and the buffer was not
-  declared final.
-- `InvalidPayload` — a payload is not valid for the target type.
+- `NoSerializableLimiterPair { len }` — none of the `len` pairs provided could frame the payload under
+  the strategy.
+- `UnexpectedSignature { valid_signatures, caught }` — a signature the channel did not deliver or
+  cannot accept: the required one is not there at all (`caught` locates the range that was searched),
+  or the one that is there identifies nothing this type takes (a signature where none belongs — a
+  positional slot, an iterable element — or a discriminator matching none of `valid_signatures`).
+- `MissingEnvelop { required_by, caught }` — an Envelop that must be there is missing: `required_by` is
+  `None` when `deserialize` was not fed a valid Envelop at all (and `caught` is the whole item that stood
+  there), `Some(signature)` when that signature requires Envelop(s) that are absent (and `caught` is the
+  range the reader searched: from the signature's tail to the end of its channel).
+- `UnconfirmedDelimiter { limiter_slice, unconfirmed }` — a `Variant::V2` Envelop's delimiter is
+  unconfirmed and the buffer was not declared final; `limiter_slice` is the frame it was read under and
+  `unconfirmed` is the delimiter slice nothing terminated (the payload it settled on sits between the
+  two).
+- `InvalidPayload { type, caught }` — the payload at `caught` is not valid for `type`.
 - `ArithmeticOverflow` — a well-formed decimal overflows the target integer (only reachable with the
   `primitive` feature).
+
+`fmt_error(error, buffer)` (behind the `primitive` feature) renders any of them against the buffer it
+was raised on: every range is printed with the bytes it covers, `\xNN`-escaping whatever is not valid
+UTF-8, and saying `<outside the buffer>` when the buffer no longer holds it. `Display` cannot do that on
+its own — an `Error` carries offsets, not the bytes they index, and nothing guarantees they are text.
 
 ## MSRV
 

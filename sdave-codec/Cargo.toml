@@ -10,10 +10,10 @@ keywords = ["serialization", "codec", "streaming", "no-std", "envelope"]
 categories = ["encoding", "no-std"]
 
 [dependencies]
-sdave = { version = "0.5.0", path = ".." }
+sdave = { version = "0.6.0", path = ".." }
 
 [dev-dependencies]
-sdave-derive = { version = "0.5.0", path = "../sdave-derive" }
+sdave-derive = { version = "0.6.0", path = "../sdave-derive" }
 # The tests drive the codec through the readable primitives (their payloads are decimal
 # text), so they need `primitive` whatever the caller selected. A package may
 # dev-depend on itself for exactly this: with the feature resolver this only applies

@@ -129,6 +129,14 @@ where
 ///
 /// Returns the index into `limiter_pairs` and the minimal working repeat.
 ///
+/// An all-empty `payload` is framed without asking [`sdave::can_serialize`], which needs a
+/// non-empty leading slice: a pair is admissible there when both of its slices are
+/// non-empty and `buffer` does not already end with its limiter.
+///
+/// # Errors
+/// Returns [`Error::NoSerializableLimiterPair`] when `limiter_pairs` is empty, or when
+/// none of its pairs can frame `payload` under `strategy`.
+///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer` MUST be a
 /// clean item boundary.
@@ -145,7 +153,9 @@ where
 {
     let len = limiter_pairs.len();
     if len == 0 {
-        return Err(Error::NoSerializableLimiterPair);
+        return Err(Error::NoSerializableLimiterPair {
+            len: Offset::new(0),
+        });
     }
     let start = match strategy {
         Strategy::RoundRobin(start) => (start as usize) % len,
@@ -185,7 +195,9 @@ where
             }
         }
     }
-    best.ok_or(Error::NoSerializableLimiterPair)
+    best.ok_or(Error::NoSerializableLimiterPair {
+        len: Offset::new(len),
+    })
 }
 
 /// Append `repeats` copies of the limiter slice followed by `repeats` copies of
@@ -221,6 +233,9 @@ where
 ///
 /// `slices` MUST already be written into `buffer`, and the frame is chosen as if
 /// the Envelop's predecessor tail were `buffer[..payload_head]`.
+///
+/// # Errors
+/// Returns what [`select_limiter_pair`] reports.
 ///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer[..payload_head]`
@@ -265,6 +280,9 @@ where
 /// This is the one-region shorthand for [`frame_payload`]: it frames
 /// `buffer[payload_head..]` as if it were the sole slice of a single Envelop.
 ///
+/// # Errors
+/// Returns what [`frame_payload`] reports.
+///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`]: the tail of `buffer[..payload_head]`
 /// MUST be a clean item boundary.
@@ -297,6 +315,9 @@ where
 /// Frame a single `payload` slice: append it (unflattened), then frame it as one
 /// Envelop, returning the 3 logical slices `[limiter, payload, delimiter]`.
 ///
+/// # Errors
+/// Returns what [`frame_region`] reports.
+///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`].
 pub unsafe fn frame_slice<T, A>(
@@ -324,10 +345,14 @@ where
 /// bytes the writer appended.
 ///
 /// # Errors
-/// Returns [`Error::UnexpectedItem`] for either case.
+/// Returns [`Error::UnexpectedSignature`] for either case, pointing at the `name` range it
+/// was given.
 fn name_is_non_empty<T>(buffer: &[T], name: &Name) -> Result<bool, Error> {
     if name.tail_offset.get() != buffer.len() || name.head_offset.get() > name.tail_offset.get() {
-        return Err(Error::UnexpectedItem);
+        return Err(Error::UnexpectedSignature {
+            valid_signatures: &[],
+            caught: (name.head_offset, name.tail_offset),
+        });
     }
     Ok(name.tail_offset.get() > name.head_offset.get())
 }
@@ -338,7 +363,7 @@ fn name_is_non_empty<T>(buffer: &[T], name: &Name) -> Result<bool, Error> {
 /// Returns the `(head, tail)` offsets of the appended signature.
 ///
 /// # Errors
-/// Returns [`Error::UnexpectedItem`] when `signature.name.tail_offset` is not
+/// Returns [`Error::UnexpectedSignature`] when `signature.name.tail_offset` is not
 /// `buffer.len()` (the name was not appended immediately before this call), or when
 /// `signature.name.head_offset` is past `tail_offset` (the range does not name an
 /// already-appended slice, so the returned offsets would not be a valid slice).
@@ -393,11 +418,11 @@ where
 /// rendered through `N`. This is the typed-signature shorthand shared by the
 /// codec's own typed serializers and the `sdave-derive` codegen.
 ///
-/// The type describer is rendered straight into `buffer`, so no intermediate
-/// `Vec` (and no trip through [`crate::render_type`]) is needed.
+/// The type describer is rendered straight into `buffer` (through [`BufferWriter`]), so no
+/// intermediate `Vec` is built for it.
 ///
 /// # Errors
-/// Returns [`Error::UnexpectedItem`] when `name.tail_offset` is not
+/// Returns [`Error::UnexpectedSignature`] when `name.tail_offset` is not
 /// `buffer.len()`, i.e. the name was not appended immediately before this call.
 pub fn write_type_signature<N, S, A>(
     buffer: &mut Vec<u8, A>,
@@ -423,6 +448,9 @@ where
 ///
 /// Returns the 6 logical slices
 /// `[outer limiter, signature, inner limiter, payload, inner delimiter, outer delimiter]`.
+///
+/// # Errors
+/// Returns what [`write_signature`] and [`frame_typed_envelop`] report.
 ///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`].
@@ -465,7 +493,7 @@ where
 /// itself is delegated to [`flatten_in_place`].
 ///
 /// # Errors
-/// Returns [`Error::UnexpectedItem`] when `typed_slices` yields no slice.
+/// Returns [`Error::UnexpectedSignature`] when `typed_slices` yields no slice.
 ///
 /// # Safety
 /// `typed_slices` MUST be the slice set of a successful `serialize_typed` call
@@ -515,7 +543,12 @@ where
     };
     let flat_len = unsafe { flatten_in_place(buffer, start, &mut boundaries) };
     let Some(limiter_len) = boundaries.first else {
-        return Err(Error::UnexpectedItem);
+        return Err(Error::UnexpectedSignature {
+            valid_signatures: &[],
+            // Nothing was yielded at all, so the whole (empty) flattened region is where
+            // the missing limiter slice was looked for.
+            caught: (Offset::new(start), Offset::new(start + flat_len)),
+        });
     };
     let delimiter_len = boundaries.last;
     let limiter_end = start + limiter_len;
@@ -571,9 +604,12 @@ where
 /// Every typed-framing path (`frame_slice_typed` and the `sdave-derive` codegen)
 /// funnels through here, so the layout lives in exactly one place.
 ///
+/// # Errors
+/// Returns what [`frame_payload`] reports.
+///
 /// # Safety
-/// Same contract as [`sdave::can_serialize`], and `out` MUST hold at least
-/// `inner.into_iter().count() + 3` elements.
+/// Same contract as [`sdave::can_serialize`], and `N` MUST be at least
+/// `inner.into_iter().count() + 3` (so every inner slice keeps its slot).
 pub unsafe fn frame_typed_envelop<T, A, I, const N: usize>(
     buffer: &mut Vec<T, A>,
     signature: (Offset, Offset),
@@ -618,6 +654,9 @@ where
 /// The 6 slots are exactly enough for the outer limiter, the signature, a single
 /// three-slice Envelop and the outer delimiter, which is the shape every generic
 /// impl's `serialize` reports.
+///
+/// # Errors
+/// Returns what [`write_type_signature`] and [`frame_typed_envelop`] report.
 ///
 /// # Safety
 /// Same contract as [`sdave::can_serialize`], and `value`'s `serialize` MUST yield

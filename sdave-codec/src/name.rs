@@ -55,10 +55,9 @@ impl ShortType {
     /// The short name: the last `::` segment of [`ShortType::full`], which MUST
     /// equal the type's own Rust ident.
     pub fn short(&self) -> &'static str {
-        let full: &'static str = self.full;
-        match full.rsplit_once("::") {
+        match self.full.rsplit_once("::") {
             Some((_, ident)) => ident,
-            None => full,
+            None => self.full,
         }
     }
 }
@@ -74,13 +73,10 @@ pub trait NamePolicy {
 
     /// `full`, shortened when it is listed in [`NamePolicy::SHORT_TYPES`].
     fn shorten(full: &'static str) -> &'static str {
-        let mut i = 0;
-        while i < Self::SHORT_TYPES.len() {
-            let short_type = &Self::SHORT_TYPES[i];
+        for short_type in Self::SHORT_TYPES {
             if short_type.full() == full {
                 return short_type.short();
             }
-            i += 1;
         }
         full
     }
@@ -101,21 +97,6 @@ impl<A: Allocator> core::fmt::Write for BufferWriter<'_, A> {
         self.0.extend_from_slice(s.as_bytes());
         Ok(())
     }
-}
-
-/// Render `T`'s wire name under `N` into a fresh `Vec` owned by `allocator`.
-///
-/// This is the owned-buffer convenience form; the codec's own typed signatures do NOT
-/// use it, they render straight into the destination buffer (see
-/// [`write_type_signature`](crate::write_type_signature)) and never allocate a
-/// `type_describer` of their own.
-pub fn render_type<N: NamePolicy, T: TypeName + ?Sized, A: Allocator + Clone>(
-    allocator: A,
-) -> Vec<u8, A> {
-    let mut out: Vec<u8, A> = Vec::new_in(allocator);
-    // Infallible: writing into a `Vec` never errors.
-    let _ = T::render::<N>(&mut BufferWriter(&mut out));
-    out
 }
 
 /// Whether `expected` is exactly `T`'s wire name under `N`.
@@ -166,10 +147,15 @@ pub fn named_signature_matches<N: NamePolicy, T: TypeName + ?Sized>(
     render_matches::<N, T>(rest)
 }
 
-/// Panics if two entries of `short_types` share a full or short name.
+/// Assert that `short_types` is a well-formed policy: no two entries share a full or a short
+/// name.
 ///
-/// Call it from a test or at application start-up to assert the application's
-/// policy is well formed (the codec cannot enforce it at compile time).
+/// Call it from a test or at application start-up; the codec cannot enforce this at compile
+/// time.
+///
+/// # Panics
+/// Panics with the duplicated name when two entries collide, whether on the full or on the
+/// shortened form.
 pub fn assert_valid(short_types: &[ShortType]) {
     for (i, a) in short_types.iter().enumerate() {
         for b in &short_types[i + 1..] {

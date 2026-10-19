@@ -22,7 +22,9 @@
 //! - `serialize` — the [`Serialize`] trait plus the framing primitives every impl
 //!   builds on (`frame_slice`, `frame_region`, `frame_payload`, `flatten_in_place`, …);
 //! - `deserialize` — the [`Deserialize`] trait;
-//! - `impls` — the shape impls: the leaf shapes and the feature-gated ones;
+//! - `impls` — the shape impls: the leaf shapes and the feature-gated ones, plus the
+//!   two helper groups it re-exports (the `format` primitive formatter and the
+//!   `channel` deframing helpers);
 //! - `iterable` — the iterable wire shape, shared by `[T]`, `[T; N]` and the heap
 //!   containers;
 //! - `name` — [`TypeName`] / [`NamePolicy`] rendering;

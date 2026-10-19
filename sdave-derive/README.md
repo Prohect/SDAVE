@@ -52,8 +52,10 @@ the typed wrapper — are stated once in `sdave-codec/README.md`. What this deri
   through its `TypeName` (`MyType(f32, f32)`; the parens are what make that text impossible for a field
   name, so the two shapes stay distinguishable). A bare tuple has no impl — put it in a tuple struct or
   tuple variant and derive, and the wire shape is the same;
-- named fields are matched **by signature**, so the order they arrive in is irrelevant and a pair this
-  type does not know is ignored;
+- named fields are matched **by signature**, so the order they arrive in is irrelevant; a signature the
+  type does not know is reported as `Error::UnexpectedSignature` at that signature (it is a document the
+  type cannot fully account for), and a signature whose value Envelop is absent is
+  `Error::MissingEnvelop`;
 - positional fields are matched **by position**: the `n`-th value Envelop of the payload is the `n`-th
   field, so a short document cannot say *which* position is missing — which is why `#[default]` is
   rejected there (see [Field attributes](#field-attributes)), while `#[skip]` is fine;
@@ -64,8 +66,9 @@ the typed wrapper — are stated once in `sdave-codec/README.md`. What this deri
 
 `Deserialize::deserialize` takes a `&mut FlatDeserializer` rather than a byte slice (the trait, and the
 contract an impl has to honour, are in `sdave-codec/README.md`). The derive leans on that: **a generated
-`deserialize` never allocates for the traversal itself** — only the values it returns, plus whatever an
-iterable field's own element walk needs (one range list, documented in the codec).
+`deserialize` never allocates for the traversal itself** — only the values it returns. An iterable field's
+element ranges, like its serialization slices, live on native stack frames; the one intermediate element
+list in the codec is `[T; N]`'s, documented there.
 
 - it deframes its own Envelop with `envelop_payload`, then collects the channel items into a fixed-size
   `[Option<Item>; 2 × encoded fields]` array with `collect_items` — one slot per *value* plus one per

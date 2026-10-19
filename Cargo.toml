@@ -21,7 +21,7 @@ resolver = "3"
 members = ["sdave-codec", "sdave-derive", "sdave-derive-impl"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 # The crates use `Allocator`, `Vec::new_in` and `Box::new_in` ungated, so the floor is a

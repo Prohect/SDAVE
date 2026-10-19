@@ -15,7 +15,10 @@ mod common;
 
 use std::alloc::Global;
 
-use common::{flatten, many_pairs, round_trip_no_eq, round_trip_with};
+use common::{
+    deserialize_one, flatten, items_of, many_pairs, round_trip_no_eq, round_trip_with,
+    single_item_buffer_as_envelop_payload,
+};
 use sdave_codec::*;
 use sdave_derive::{Deserialize, Serialize};
 
@@ -205,7 +208,7 @@ fn vec_typed_round_trips() {
     let payload =
         unsafe { single_item_buffer_as_envelop_payload(&flat, Variant::V1, &pairs, None, Global) }
             .unwrap();
-    let items = items_of(payload, Variant::V1, &pairs, Global).unwrap();
+    let items = items_of(payload, Variant::V1, &pairs, Global);
     assert_eq!(items.len(), 2 + values.len());
     match &items[0] {
         Item::N { non_envelop } => {

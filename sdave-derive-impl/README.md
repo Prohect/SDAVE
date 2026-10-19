@@ -50,9 +50,13 @@ is written so that nothing in the annotated crate can capture its names:
   (`allocator_ident`/`policy_ident`). Both are legal (if unusual) identifiers, so the generated impl can
   never collide with a generic parameter of the annotated type.
 - **Locals and bindings are `__sdave_*`**: `__sdave_head`, `__sdave_slices`, `__sdave_cursor`,
-  `__sdave_signature`, `__sdave_payload`, `__sdave_items`, `__sdave_value`, `__sdave_inner`, and a
-  positional binding `__sdave_field_<n>` per field. The underscore prefix also keeps a binding that a
-  `#[skip]`ped field never reads out of the `unused_variables` lint.
+  `__sdave_signature`, `__sdave_buffer`, `__sdave_payload`, `__sdave_items`, `__sdave_value`,
+  `__sdave_inner`, and a positional binding `__sdave_field_<n>` per field. The underscore prefix also
+  keeps a binding that a `#[skip]`ped field never reads out of the `unused_variables` lint.
+- **Item offsets are absolute.** `__sdave_buffer` is the raw buffer the reader deframed from and
+  `__sdave_payload` is the payload's own `(Offset, Offset)` frame in it, so slicing an item and handing a
+  nested frame to `with_deserializer` are the same coordinates — at any nesting depth, and the same ones
+  an `Error` reports.
 - **The sealing trait is `__SdaveDynClaim_<Trait>`**, `#[doc(hidden)]` and non-camel-case-allowed.
 
 ## `cargo expand` order
@@ -81,12 +85,11 @@ generic over `__SDAVE_A`: a projection off a generic parameter is not a constant
   `None` padding, which the core's `Slices` view ignores.
 - **Only a generic type flattens.** Both counts above are static, so a monomorphic type (named or
   positional) records its fields' slices in that array and frames it once. A type with type/const
-  parameters cannot project a field's `SLICES` in a const context, so it falls back to the flattened path
-  (`3`/`6`, concatenated in place) — that is the only reason in-place flatten still exists.
+  parameters cannot project a field's `SLICES` in a const context, so it reports the fixed `3`/`6` every
+  flattened shape uses and concatenates its fields in place like an iterable — that is the only reason
+  in-place flatten still exists.
 - **`SlicesTyped` is `Slices + 3`**: the outer limiter, the `name: type` signature and the outer
-  delimiter.
-- **A type with type/const parameters** cannot size the array from its fields and instead reports the
-  fixed `3`/`6` every flattened shape uses, flattening its fields in place like an iterable.
+  delimiter (so `6` on the flattened path, where `Slices` is `3`).
 
 The two paths are the same codegen with a different tail: the monomorphic path records each field's
 slices in the array and frames the array once, the flattened path concatenates each field's logical
@@ -102,12 +105,13 @@ half the cases:
 | `field_signature` | one *named* field's `NonEnvelop` text (`name: ` ++ rendered type); a positional field has none |
 | `field_serialize_loop` / `field_flatten_loop` | the per-field value (plus its signature unless positional), recorded in the static slice array / concatenated in place for a generic type |
 | `enum_serialize_arms` | the `match self` arms, one per variant, for both enum bodies |
-| `envelop_payload` | the reader's first step: deframe the value's own Envelop into `__sdave_payload` |
+| `envelop_payload` | the reader's first step: deframe the value's own Envelop into `__sdave_buffer` (raw bytes) and `__sdave_payload` (its `(head, tail)` frame) |
 | `payload_and_items` | `envelop_payload` plus the channel items, collected into a fixed-size `__sdave_items` array |
 | `item_slots` | that array's length: `2 × encoded fields` for a named shape, `1 × encoded fields` for a positional one |
-| `parse_fields` | decoding a named channel by signature, or a positional one by order, each value through `with_deserializer` |
+| `parse_fields` | decoding a named channel by signature, or a positional one by order, each value through `with_deserializer`; a positional slot holding a signature is reported as `UnexpectedSignature` |
 | `positional_struct_slices` | the `SLICES` of a tuple struct: `2 + Σ SLICES_i` (no signature slots) |
-| `constructor` / `fieldless_constructor` | the value expression a deserializer returns |
+| `constructor` / `fieldless_constructor` | the value expression a deserializer returns; a missing mandatory field reports `UnexpectedSignature` with the signatures it would have accepted |
+| `unexpected_signature` / `missing_envelop` / `signature_range` | the two failure reports a reader raises, spelled once: a signature that is not one of `valid_signatures`, and an Envelop that the signature `required_by` demands (with `signature_range` for a bound `non_envelop`) |
 | `serialize_typed_method` | the typed wrapper, shared with `#[sdave_dyn]` |
 | `slices_type` / `global_allocator` | the `[Option<(Offset, Offset)>; n]` array type and the concrete allocator used to evaluate `SLICES` |
 

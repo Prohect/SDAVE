@@ -35,10 +35,14 @@ where
     /// [`Serialize`](crate::Serialize) call was given.
     ///
     /// Implementations MUST treat `deserializer` as lent, not taken: they may
-    /// descend into sub-slices with `with_deserializer` (which recycles the
+    /// descend into sub-frames with `with_deserializer` (which recycles the
     /// `Vec`s), but they MUST NOT replace its buffer with anything outside the
     /// bytes they were given, and they MUST leave it positioned after the value
     /// they consumed. Its item cache may be cleared on return.
+    ///
+    /// A child reads the raw *prefix* the frame ends at, so the offsets it reports
+    /// are absolute in the origin buffer — the same coordinate system the enclosing
+    /// call (and any [`Error`]) uses.
     ///
     /// `final_buffer` lets the caller declare that `buffer` is complete and MUST
     /// not grow: `Some(offset)` asserts `offset == deserializer.buffer().len()`
